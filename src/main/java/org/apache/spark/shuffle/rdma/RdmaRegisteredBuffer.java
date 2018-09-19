@@ -28,6 +28,13 @@ public class RdmaRegisteredBuffer {
   private final AtomicInteger refCount = new AtomicInteger(0);
   private int blockOffset = 0;
 
+  @Override
+  public String toString() {
+    String addres = (rdmaBuffer == null) ? "null" : Long.toString(getRegisteredAddress());
+    return "RdmaRegisteredBuffer(blockOffset=" + blockOffset + "address=" +
+      addres + ")";
+  }
+
   public RdmaRegisteredBuffer(RdmaBufferManager rdmaBufferManager, int length)
       throws IOException {
     this.rdmaBufferManager = rdmaBufferManager;
@@ -72,7 +79,8 @@ public class RdmaRegisteredBuffer {
 
   ByteBuffer getByteBuffer(int length) throws IOException {
     if (blockOffset + length > getRegisteredLength()) {
-      throw new IllegalArgumentException("Exceeded Registered Length!");
+      throw new IllegalArgumentException("Exceeded Registered Length! blockOffset: " + blockOffset +
+        " ,length: " + length + " ,registeredLength: " + getRegisteredLength());
     }
 
     Class<?> classDirectByteBuffer;
@@ -96,7 +104,6 @@ public class RdmaRegisteredBuffer {
     } catch (Exception e) {
       throw new IOException("java.nio.DirectByteBuffer exception: " + e.toString());
     }
-
     return byteBuffer;
   }
 }

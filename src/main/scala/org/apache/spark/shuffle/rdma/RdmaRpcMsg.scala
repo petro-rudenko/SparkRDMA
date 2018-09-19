@@ -25,15 +25,13 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.rdma.RdmaRpcMsgType.RdmaRpcMsgType
-import org.apache.spark.storage.BlockManagerId
-
 
 object RdmaRpcMsgType extends Enumeration {
   type RdmaRpcMsgType = Value
-  val RdmaShuffleManagerHello, AnnounceRdmaShuffleManagers = Value
+  val RdmaShuffleManagerHello, AnnounceRdmaShuffleManagers, RdmaPrefetchRPCMessage = Value
 }
 
-trait RdmaRpcMsg {
+trait RdmaRpcMsg extends Logging{
   protected def msgType: RdmaRpcMsgType
   protected def getLengthInSegments(segmentSize: Int): Array[Int]
   protected def read(dataIn: DataInputStream): Unit
@@ -45,7 +43,6 @@ trait RdmaRpcMsg {
       maxSegmentSize: Int): Array[RdmaByteBufferManagedBuffer] = {
     val arrSegmentLengths = getLengthInSegments(maxSegmentSize - overhead)
     val bufs = Array.fill(arrSegmentLengths.length) { allocator(maxSegmentSize) }
-
     val outs = for ((buf, bufferIndex) <- bufs.zipWithIndex) yield {
       val out = new DataOutputStream(buf.createOutputStream())
       out.writeInt(overhead + arrSegmentLengths(bufferIndex))
@@ -73,6 +70,8 @@ object RdmaRpcMsg extends Logging {
         RdmaShuffleManagerHelloRpcMsg(in)
       case RdmaRpcMsgType.AnnounceRdmaShuffleManagers =>
         RdmaAnnounceRdmaShuffleManagersRpcMsg(in)
+      case RdmaRpcMsgType.RdmaPrefetchRPCMessage =>
+        RdmaWriteBlocks(in)
       case _ =>
         logger.warn("Received an unidentified RPC")
         null
@@ -167,6 +166,78 @@ class RdmaAnnounceRdmaShuffleManagersRpcMsg(var rdmaShuffleManagerIds: Seq[RdmaS
 object RdmaAnnounceRdmaShuffleManagersRpcMsg {
   def apply(in: DataInputStream): RdmaRpcMsg = {
     val obj = new RdmaAnnounceRdmaShuffleManagersRpcMsg()
+    obj.read(in)
+    obj
+  }
+}
+
+case class MapIdReduceId(mapId: Int, reduceId: Int)
+/**
+ * Prefetches blocks for a given reduceId and mapIds
+ * @param shuffleId
+ * @param reduceId
+ * @param mapIds
+ */
+case class RdmaWriteBlocks(var callBackId: Int,
+                      var nBlocks: Int,
+                      var shuffleId: Int,
+                      var resultBuffer: RdmaBlockLocation,
+                      var rdmaShuffleManagerId: RdmaShuffleManagerId,
+                      var blocks: Seq[MapIdReduceId])
+  extends RdmaRpcMsg {
+  private def this() = this(0, 0, 0, null, null, null)  // For deserialization only
+
+  override protected def msgType: RdmaRpcMsgType = RdmaRpcMsgType.RdmaPrefetchRPCMessage
+
+  override protected def getLengthInSegments(segmentSize: Int): Array[Int] = {
+    val msgSize = 28 + rdmaShuffleManagerId.serializedLength + 8 * blocks.size
+    require(msgSize <= segmentSize,
+      s"Message size: $msgSize is greater than segment size $segmentSize")
+    Array.fill(1) { msgSize }
+  }
+
+  override protected def writeSegments(outs: Iterator[(DataOutputStream, Int)]): Unit = {
+    var curOut: (DataOutputStream, Int) = null
+
+    curOut = outs.next()
+    curOut._1.writeInt(callBackId)
+    curOut._1.writeInt(nBlocks)
+    curOut._1.writeInt(shuffleId)
+    curOut._1.writeLong(resultBuffer.address)
+    curOut._1.writeInt(resultBuffer.length)
+    curOut._1.writeInt(resultBuffer.mKey)
+    rdmaShuffleManagerId.write(curOut._1)
+
+    for (block <- blocks) {
+      curOut._1.writeInt(block.mapId)
+      curOut._1.writeInt(block.reduceId)
+    }
+  }
+
+  override protected def read(in: DataInputStream): Unit = {
+    callBackId = in.readInt()
+    nBlocks = in.readInt()
+    shuffleId = in.readInt()
+    val address = in.readLong()
+    val length = in.readInt()
+    val key = in.readInt()
+    resultBuffer = RdmaBlockLocation(address, length, key)
+    rdmaShuffleManagerId = RdmaShuffleManagerId(in)
+    val tmpBlocks = new ArrayBuffer[MapIdReduceId]
+    scala.util.control.Exception.ignoring(classOf[EOFException]) {
+      while (true) {
+        val mapId = in.readInt()
+        val reduceId = in.readInt()
+        tmpBlocks += MapIdReduceId(mapId, reduceId)
+      }
+    }
+    blocks = tmpBlocks
+  }
+}
+
+object RdmaWriteBlocks {
+  def apply(in: DataInputStream): RdmaRpcMsg = {
+    val obj = new RdmaWriteBlocks()
     obj.read(in)
     obj
   }

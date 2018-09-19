@@ -17,7 +17,7 @@
 
 package org.apache.spark.shuffle.rdma;
 
-import com.ibm.disni.rdma.verbs.*;
+import com.ibm.disni.verbs.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,7 +54,7 @@ class RdmaNode {
   private int cpuIndex = 0;
 
   RdmaNode(String hostName, boolean isExecutor, final RdmaShuffleConf conf,
-      final RdmaCompletionListener receiveListener) throws Exception {
+           final RdmaCompletionListener receiveListener) throws Exception {
     this.conf = conf;
 
     try {
@@ -73,13 +73,16 @@ class RdmaNode {
       int err = 0;
       int bindPort = isExecutor ? conf.executorPort() : conf.driverPort();
       for (int i = 0; i < conf.portMaxRetries(); i++) {
-        err = listenerRdmaCmId.bindAddr(
-          new InetSocketAddress(InetAddress.getByName(hostName), bindPort));
-        if (err == 0) {
+        try {
+          listenerRdmaCmId.bindAddr(
+            new InetSocketAddress(InetAddress.getByName(hostName), bindPort));
+          err = 0;
           break;
+        } catch (IOException ex) {
+          err = -1;
+          logger.info("Failed to bind to port {} on iteration {}", bindPort, i);
+          bindPort = bindPort != 0 ? bindPort + 1 : 0;
         }
-        logger.info("Failed to bind to port {} on iteration {}", bindPort, i);
-        bindPort = bindPort != 0 ? bindPort + 1 : 0;
       }
 
       if (err != 0 || listenerRdmaCmId.getVerbs() == null) {
@@ -88,10 +91,7 @@ class RdmaNode {
 
       initCpuArrayList();
 
-      err = listenerRdmaCmId.listen(BACKLOG);
-      if (err != 0) {
-        throw new IOException("Failed to start listener: " + err);
-      }
+      listenerRdmaCmId.listen(BACKLOG);
 
       localInetSocketAddress = (InetSocketAddress) listenerRdmaCmId.getSource();
 
@@ -148,7 +148,7 @@ class RdmaNode {
 
             RdmaChannel.RdmaChannelType rdmaChannelType;
             if (driverInetAddress.equals(inetSocketAddress.getAddress()) ||
-                driverInetAddress.equals(localInetSocketAddress.getAddress())) {
+              driverInetAddress.equals(localInetSocketAddress.getAddress())) {
               // RPC communication is limited to driver<->executor only
               rdmaChannelType = RdmaChannel.RdmaChannelType.RPC_RESPONDER;
             } else {
@@ -198,7 +198,7 @@ class RdmaNode {
             rdmaChannel.stop();
           } else {
             logger.info("Received an unexpected CM Event {}",
-                RdmaCmEvent.EventType.values()[eventType]);
+              RdmaCmEvent.EventType.values()[eventType]);
           }
         } catch (Exception e) {
           e.printStackTrace();
@@ -207,7 +207,7 @@ class RdmaNode {
       }
       logger.info("Exiting RdmaNode Listening Server");
     },
-    "RdmaNode connection listening thread");
+      "RdmaNode connection listening thread");
 
     runThread.set(true);
     listeningThread.setDaemon(true);
@@ -276,7 +276,7 @@ class RdmaNode {
   public RdmaBufferManager getRdmaBufferManager() { return rdmaBufferManager; }
 
   public RdmaChannel getRdmaChannel(InetSocketAddress remoteAddr, boolean mustRetry)
-      throws IOException, InterruptedException {
+    throws IOException, InterruptedException {
     final long startTime = System.nanoTime();
     final int maxConnectionAttempts = conf.maxConnectionAttempts();
     final long connectionTimeout = maxConnectionAttempts * conf.rdmaCmEventTimeout();
@@ -289,7 +289,7 @@ class RdmaNode {
       if (rdmaChannel == null) {
         RdmaChannel.RdmaChannelType rdmaChannelType;
         if (driverInetAddress.equals(remoteAddr.getAddress()) ||
-            driverInetAddress.equals(localInetSocketAddress.getAddress())) {
+          driverInetAddress.equals(localInetSocketAddress.getAddress())) {
           // RPC communication is limited to driver<->executor only
           rdmaChannelType = RdmaChannel.RdmaChannelType.RPC_REQUESTOR;
         } else {

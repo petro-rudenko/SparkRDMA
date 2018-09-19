@@ -26,9 +26,9 @@ import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.ibm.disni.rdma.verbs.IbvMr;
-import com.ibm.disni.rdma.verbs.IbvPd;
-import com.ibm.disni.rdma.verbs.SVCRegMr;
+import com.ibm.disni.verbs.IbvMr;
+import com.ibm.disni.verbs.IbvPd;
+import com.ibm.disni.verbs.SVCRegMr;
 import sun.nio.ch.FileChannelImpl;
 
 public class RdmaMappedFile {
@@ -154,7 +154,7 @@ public class RdmaMappedFile {
         "supported");
     }
 
-    IbvMr ibvMr = null;
+    IbvMr ibvMr;
     if (!rdmaBufferManager.useOdp()) {
       SVCRegMr svcRegMr = ibvPd.regMr(address, (int)length, ACCESS).execute();
       ibvMr = svcRegMr.getMr();
@@ -165,7 +165,6 @@ public class RdmaMappedFile {
       ibvMr = svcRegMr.getMr();
       svcRegMr.free();
     }
-
     rdmaFileMappings.add(new RdmaFileMapping(ibvMr, address, mapAddress, length, alignedLength));
   }
 

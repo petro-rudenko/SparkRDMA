@@ -17,7 +17,7 @@
 
 package org.apache.spark.shuffle.rdma
 
-import com.ibm.disni.rdma.verbs.IbvContext
+import com.ibm.disni.verbs.IbvContext
 
 import org.apache.spark.{SPARK_VERSION, SparkConf}
 import org.apache.spark.internal.Logging

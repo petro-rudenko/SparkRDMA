@@ -17,14 +17,13 @@
 
 package org.apache.spark.shuffle.rdma;
 
-import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.memory.MemoryBlock;
 import org.apache.spark.unsafe.memory.UnsafeMemoryAllocator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.ibm.disni.rdma.verbs.IbvPd;
-import com.ibm.disni.rdma.verbs.SVCRegMr;
-import com.ibm.disni.rdma.verbs.IbvMr;
+import com.ibm.disni.verbs.IbvPd;
+import com.ibm.disni.verbs.SVCRegMr;
+import com.ibm.disni.verbs.IbvMr;
 
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -61,7 +60,7 @@ class RdmaBuffer {
   }
 
   public void clean() {
-    Platform.setMemory(address, (byte)0, length);
+    // Platform.setMemory(address, (byte)0, length);
   }
 
   /**
@@ -102,6 +101,10 @@ class RdmaBuffer {
       unregister();
       unsafeAlloc.free(block);
     }
+  }
+
+  public IbvMr getMr() {
+    return ibvMr;
   }
 
   private static IbvMr register(IbvPd ibvPd, long address, int length) throws IOException {

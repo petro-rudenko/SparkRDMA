@@ -140,20 +140,9 @@ object RdmaShuffleManagerId {
     rdmaShuffleManagerIdIdCache.putIfAbsent(id, id)
     rdmaShuffleManagerIdIdCache.get(id)
   }
+
+  def serializedLength(blockManagerId: BlockManagerId): Int = {
+    val hostnameInUtf = blockManagerId.host.getBytes(Charset.forName("UTF-8"))
+    2 + hostnameInUtf.length + 4 + new SerializableBlockManagerId(blockManagerId).serializedLength
+  }
 }
-
-class RdmaBaseShuffleHandle[K, V, C](val driverTableAddress: Long,
-    val driverTableLength: Int,
-    val driverTableRKey: Int,
-    shuffleId: Int,
-    numMaps: Int,
-    dependency: ShuffleDependency[K, V, C])
-    extends BaseShuffleHandle[K, V, C](shuffleId, numMaps, dependency)
-
-class RdmaSerializedShuffleHandle[K, V](val driverTableAddress: Long,
-    val driverTableLength: Int,
-    val driverTableRKey: Int,
-    shuffleId: Int,
-    numMaps: Int,
-    dependency: ShuffleDependency[K, V, V])
-    extends SerializedShuffleHandle[K, V](shuffleId, numMaps, dependency)

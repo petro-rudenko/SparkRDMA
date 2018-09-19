@@ -28,7 +28,7 @@ import org.apache.spark.storage.ShuffleBlockId
 
 class RdmaShuffleBlockResolver(rdmaShuffleManager: RdmaShuffleManager)
     extends IndexShuffleBlockResolver(rdmaShuffleManager.conf) with Logging {
-  private val rdmaShuffleDataMap = new ConcurrentHashMap[Int, RdmaWrapperShuffleData]
+  val rdmaShuffleDataMap = new ConcurrentHashMap[Int, RdmaWrapperShuffleData]
 
   def newShuffleWriter[K, V](baseShuffleHandle: BaseShuffleHandle[K, V, _]): Unit = synchronized {
     val shuffleId = baseShuffleHandle.shuffleId

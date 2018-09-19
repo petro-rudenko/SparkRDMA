@@ -17,7 +17,7 @@
 
 package org.apache.spark.shuffle.rdma;
 
-import com.ibm.disni.rdma.verbs.*;
+import com.ibm.disni.verbs.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,8 +37,12 @@ public class RdmaChannel {
   private static final int MAX_ACK_COUNT = 4;
   private static final int POLL_CQ_LIST_SIZE = 16;
   private static final int ZERO_SIZED_RECV_WR_LIST_SIZE = 16;
-  private static final AtomicInteger idGenerator = new AtomicInteger(0);
-  private final int id = idGenerator.getAndIncrement();
+  private static final AtomicInteger idGenerator = new AtomicInteger(Integer.MAX_VALUE);
+  private final int id = Integer.MAX_VALUE - idGenerator.decrementAndGet();
+  private static final int MAX_SGE_ELEMENTS = 1;
+
+  private static final ConcurrentHashMap<Integer, RdmaCompletionListener> completionListenerMap =
+    new ConcurrentHashMap<>();
 
   private final ConcurrentHashMap<Integer, ConcurrentLinkedDeque<SVCPostSend>> svcPostSendCache =
     new ConcurrentHashMap();
@@ -130,29 +134,30 @@ public class RdmaChannel {
   // NOOP_RESERVED_INDEX is used for send operations that do not require a callback
   private static final int NOOP_RESERVED_INDEX = 0;
   private final AtomicInteger completionInfoIndex = new AtomicInteger(NOOP_RESERVED_INDEX);
+  private RdmaShuffleConf conf = null;
 
   RdmaChannel(
-      RdmaChannelType rdmaChannelType,
-      RdmaShuffleConf conf,
-      RdmaBufferManager rdmaBufferManager,
-      RdmaCompletionListener receiveListener,
-      RdmaCmId cmId,
-      int cpuVector) {
+    RdmaChannelType rdmaChannelType,
+    RdmaShuffleConf conf,
+    RdmaBufferManager rdmaBufferManager,
+    RdmaCompletionListener receiveListener,
+    RdmaCmId cmId,
+    int cpuVector) {
     this(rdmaChannelType, conf, rdmaBufferManager, receiveListener, cpuVector);
     this.cmId = cmId;
   }
 
   RdmaChannel(
-      RdmaChannelType rdmaChannelType,
-      RdmaShuffleConf conf,
-      RdmaBufferManager rdmaBufferManager,
-      RdmaCompletionListener receiveListener,
-      int cpuVector) {
+    RdmaChannelType rdmaChannelType,
+    RdmaShuffleConf conf,
+    RdmaBufferManager rdmaBufferManager,
+    RdmaCompletionListener receiveListener,
+    int cpuVector) {
     this.rdmaChannelType = rdmaChannelType;
     this.receiveListener = receiveListener;
     this.rdmaBufferManager = rdmaBufferManager;
     this.cpuVector = cpuVector;
-
+    this.conf = conf;
     switch (rdmaChannelType) {
       case RPC_REQUESTOR:
         // Requires full-size sends, and receives for credit reports only
@@ -179,18 +184,22 @@ public class RdmaChannel {
         break;
 
       case RDMA_READ_REQUESTOR:
-        // Requires sends only, no need for any receives
-        this.recvDepth = 0;
+        if (conf.swFlowControl()) {
+          this.recvDepth = RECV_CREDIT_REPORT_RATIO;
+          this.remoteRecvCredits = new Semaphore(conf.recvQueueDepth(), false);
+        } else {
+          this.recvDepth = conf.recvQueueDepth();
+        }
         this.recvWrSize = 0;
         this.sendDepth = conf.sendQueueDepth();
         this.sendBudgetSemaphore = new Semaphore(sendDepth, false);
         break;
 
       case RDMA_READ_RESPONDER:
-        // Doesn't require sends nor receives
-        this.recvDepth = 0;
-        this.recvWrSize = 0;
-        this.sendDepth = 0;
+        // Requires full-size receives and sends for credit reports only
+        this.recvDepth = conf.recvQueueDepth();
+        this.recvWrSize = conf.recvWrSize();
+        this.sendDepth = conf.sendQueueDepth();
         break;
 
       default:
@@ -245,14 +254,15 @@ public class RdmaChannel {
       ibvWCs[i] = new IbvWC();
     }
     svcPollCq = cq.poll(ibvWCs, POLL_CQ_LIST_SIZE);
-
+    ibvContext.checkResources(Math.max(recvDepth, sendDepth), MAX_SGE_ELEMENTS,
+      (sendDepth + recvDepth) > 0 ? sendDepth + recvDepth : 1);
     IbvQPInitAttr attr = new IbvQPInitAttr();
     attr.setQp_type(IbvQP.IBV_QPT_RC);
     attr.setSend_cq(cq);
     attr.setRecv_cq(cq);
-    attr.cap().setMax_recv_sge(1);
+    attr.cap().setMax_recv_sge(MAX_SGE_ELEMENTS);
     attr.cap().setMax_recv_wr(recvDepth);
-    attr.cap().setMax_send_sge(1);
+    attr.cap().setMax_send_sge(MAX_SGE_ELEMENTS);
     attr.cap().setMax_send_wr(sendDepth);
 
     qp = cmId.createQP(rdmaBufferManager.getPd(), attr);
@@ -284,19 +294,13 @@ public class RdmaChannel {
 
     // Resolve the addr
     setRdmaChannelState(RdmaChannelState.CONNECTING);
-    int err = cmId.resolveAddr(null, socketAddress, resolvePathTimeout);
-    if (err != 0) {
-      throw new IOException("resolveAddr() failed: " + err);
-    }
+    cmId.resolveAddr(null, socketAddress, resolvePathTimeout);
 
     processRdmaCmEvent(RdmaCmEvent.EventType.RDMA_CM_EVENT_ADDR_RESOLVED.ordinal(),
       rdmaCmEventTimeout);
 
     // Resolve the route
-    err = cmId.resolveRoute(resolvePathTimeout);
-    if (err != 0) {
-      throw new IOException("resolveRoute() failed: " + err);
-    }
+    cmId.resolveRoute(resolvePathTimeout);
 
     processRdmaCmEvent(RdmaCmEvent.EventType.RDMA_CM_EVENT_ROUTE_RESOLVED.ordinal(),
       rdmaCmEventTimeout);
@@ -308,13 +312,14 @@ public class RdmaChannel {
     // connParams.setInitiator_depth((byte) 16);
     // connParams.setResponder_resources((byte) 16);
     // retry infinite
-    connParams.setRetry_count((byte) 7);
-    connParams.setRnr_retry_count((byte) 7);
+    connParams.setRetry_count((byte) 1);
+    connParams.setRnr_retry_count((byte) 1);
 
-    err = cmId.connect(connParams);
-    if (err != 0) {
+    try {
+      cmId.connect(connParams);
+    } catch (IOException ex) {
       setRdmaChannelState(RdmaChannelState.ERROR);
-      throw new IOException("connect() failed");
+      throw ex;
     }
 
     processRdmaCmEvent(RdmaCmEvent.EventType.RDMA_CM_EVENT_ESTABLISHED.ordinal(),
@@ -336,10 +341,11 @@ public class RdmaChannel {
 
     setRdmaChannelState(RdmaChannelState.CONNECTING);
 
-    int err = cmId.accept(connParams);
-    if (err != 0) {
+    try {
+      cmId.accept(connParams);
+    } catch (IOException ex) {
       setRdmaChannelState(RdmaChannelState.ERROR);
-      throw new IOException("accept() failed");
+      throw ex;
     }
   }
 
@@ -388,12 +394,13 @@ public class RdmaChannel {
       numWrElements = NOOP_RESERVED_INDEX;
     }
 
+
     stack = svcPostSendCache.computeIfAbsent(numWrElements,
       numElements -> new ConcurrentLinkedDeque<>());
 
     // To avoid buffer allocations in disni update cached SVCPostSendObject
-    if (sendWRList.getFirst().getOpcode() == IbvSendWR.IbvWrOcode.IBV_WR_RDMA_READ.ordinal()
-        && (svcPostSendObject = stack.pollFirst()) != null) {
+    if (sendWRList.getFirst().getOpcode() == IbvSendWR.IbvWrOcode.IBV_WR_SEND.ordinal()
+      && (svcPostSendObject = stack.pollFirst()) != null) {
       int i = 0;
       for (IbvSendWR sendWr: sendWRList) {
         SVCPostSend.SendWRMod sendWrMod = svcPostSendObject.getWrMod(i);
@@ -419,7 +426,8 @@ public class RdmaChannel {
 
     svcPostSendObject.execute();
     // Cache SVCPostSend objects only for RDMA Read requests
-    if (sendWRList.getFirst().getOpcode() == IbvSendWR.IbvWrOcode.IBV_WR_RDMA_READ.ordinal()) {
+
+    if (sendWRList.getFirst().getOpcode() == IbvSendWR.IbvWrOcode.IBV_WR_SEND.ordinal()) {
       stack.add(svcPostSendObject);
     } else {
       svcPostSendObject.free();
@@ -436,8 +444,8 @@ public class RdmaChannel {
       // without fairness. We don't care about fairness, since Spark doesn't expect the requests to
       // complete in a particular order
       if (pendingSend.recvCreditsNeeded > 0 &&
-          remoteRecvCredits != null &&
-          !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
+        remoteRecvCredits != null &&
+        !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
         sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size());
         sendWrQueue.add(pendingSend);
       } else {
@@ -465,8 +473,8 @@ public class RdmaChannel {
       if (sendBudgetSemaphore.tryAcquire(pendingSend.ibvSendWRList.size())) {
         if (sendWrQueue.remove(pendingSend)) {
           if (pendingSend.recvCreditsNeeded > 0 &&
-              remoteRecvCredits != null &&
-              !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
+            remoteRecvCredits != null &&
+            !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
             sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size());
             sendWrQueue.add(pendingSend);
           } else {
@@ -484,12 +492,14 @@ public class RdmaChannel {
         } else {
           sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size());
         }
+      } else {
+        logger.debug("sendWrQueue size: {}", sendWrQueue.size());
       }
     }
   }
 
   void rdmaReadInQueue(RdmaCompletionListener listener, long localAddress, int lKey,
-      int[] sizes, long[] remoteAddresses, int[] rKeys) throws IOException {
+                       int[] sizes, long[] remoteAddresses, int[] rKeys) throws IOException {
     long offset = 0;
     LinkedList<IbvSendWR> readWRList = new LinkedList<>();
     for (int i = 0; i < remoteAddresses.length; i++) {
@@ -534,7 +544,7 @@ public class RdmaChannel {
    * @throws IOException
    */
   public void rdmaWriteInQueue(RdmaCompletionListener listener, long localAddress, int localLength,
-      int lKey, long remoteAddress, int rKey) throws IOException {
+                               int lKey, long remoteAddress, int rKey) throws IOException {
     LinkedList<IbvSendWR> writeWRList = new LinkedList<>();
 
     IbvSge writeSge = new IbvSge();
@@ -564,8 +574,62 @@ public class RdmaChannel {
     }
   }
 
+  public int putCompletionListener(RdmaCompletionListener listener) {
+    int callbackId = idGenerator.decrementAndGet();
+    if (callbackId <= 65536) {
+      idGenerator.set(Integer.MAX_VALUE);
+      callbackId = idGenerator.decrementAndGet();
+    }
+    completionListenerMap.put(callbackId, listener);
+    return callbackId;
+  }
+
+  public void rdmaWriteInQueueWithImm(RdmaCompletionListener listener, long[] localAddresses,
+                                      int[] localLengths, int[] lKeys, long remoteAddress, int rKey,
+                                      int immData) throws IOException {
+    LinkedList<IbvSendWR> writeWRList = new LinkedList<>();
+    long  offset = 0;
+    for (int i = 0; i < localAddresses.length; i += MAX_SGE_ELEMENTS) {
+      IbvSendWR writeWr = new IbvSendWR();
+
+      LinkedList<IbvSge> writeSgeList = new LinkedList<>();
+      int bytesInSge = 0;
+      for (int j = i; j < Math.min(localAddresses.length, i + MAX_SGE_ELEMENTS); j++) {
+        IbvSge writeSge = new IbvSge();
+        writeSge.setAddr(localAddresses[j]);
+        writeSge.setLength(localLengths[j]);
+        writeSge.setLkey(lKeys[j]);
+        writeSgeList.add(writeSge);
+        bytesInSge += localLengths[j];
+      }
+
+      writeWr.setOpcode(IbvSendWR.IbvWrOcode.IBV_WR_RDMA_WRITE.ordinal());
+      writeWr.setSg_list(writeSgeList);
+      writeWr.setNum_sge(writeSgeList.size());
+      writeWr.setWr_id(Long.MAX_VALUE - 1);
+      writeWr.getRdma().setRemote_addr(remoteAddress + offset);
+      writeWr.getRdma().setRkey(rKey);
+      writeWr.setSend_flags(0);
+      writeWRList.add(writeWr);
+      offset += bytesInSge;
+    }
+    int completionInfoId = putCompletionInfo(
+      new CompletionInfo(listener, writeWRList.size()));
+
+    writeWRList.getLast().setWr_id(completionInfoId);
+    writeWRList.getLast().setSend_flags(IbvSendWR.IBV_SEND_SIGNALED);
+    writeWRList.getLast().setImm_data(immData);
+    writeWRList.getLast().setOpcode(IbvSendWR.IbvWrOcode.IBV_WR_RDMA_WRITE_WITH_IMM.ordinal());
+    try {
+      rdmaPostWRListInQueue(new PendingSend(writeWRList, 1));
+    } catch (Exception e) {
+      removeCompletionInfo(completionInfoId);
+      throw e;
+    }
+  }
+
   public void rdmaSendInQueue(RdmaCompletionListener listener, long[] localAddresses, int[] lKeys,
-      int[] sizes) throws IOException {
+                              int[] sizes) throws IOException {
     LinkedList<IbvSendWR> sendWRList = new LinkedList<>();
     for (int i = 0; i < localAddresses.length; i++) {
       IbvSge sendSge = new IbvSge();
@@ -606,7 +670,6 @@ public class RdmaChannel {
     sendWr.setSend_flags(IbvSendWR.IBV_SEND_SIGNALED);
     sendWr.setWr_id(NOOP_RESERVED_INDEX); // doesn't require a callback
     sendWRList.add(sendWr);
-
     rdmaPostWRList(sendWRList);
   }
 
@@ -702,13 +765,14 @@ public class RdmaChannel {
           boolean wcSuccess = ibvWCs[i].getStatus() == IbvWC.IbvWcStatus.IBV_WC_SUCCESS.ordinal();
           if (!wcSuccess && !isError()) {
             setRdmaChannelState(RdmaChannelState.ERROR);
-            logger.error("Completion with error: " +
+            logger.error("Operation {} completed with error: {}",
+              IbvWC.IbvWcOpcode.valueOf(ibvWCs[i].getOpcode()),
               IbvWC.IbvWcStatus.values()[ibvWCs[i].getStatus()].name());
           }
 
           if (ibvWCs[i].getOpcode() == IbvWC.IbvWcOpcode.IBV_WC_SEND.getOpcode() ||
-              ibvWCs[i].getOpcode() == IbvWC.IbvWcOpcode.IBV_WC_RDMA_WRITE.getOpcode() ||
-              ibvWCs[i].getOpcode() == IbvWC.IbvWcOpcode.IBV_WC_RDMA_READ.getOpcode()) {
+            ibvWCs[i].getOpcode() == IbvWC.IbvWcOpcode.IBV_WC_RDMA_WRITE.getOpcode() ||
+            ibvWCs[i].getOpcode() == IbvWC.IbvWcOpcode.IBV_WC_RDMA_READ.getOpcode()) {
             int completionInfoId = (int)ibvWCs[i].getWr_id();
             if (completionInfoId != NOOP_RESERVED_INDEX) {
               CompletionInfo completionInfo = removeCompletionInfo(completionInfoId);
@@ -741,16 +805,43 @@ public class RdmaChannel {
               }
             } else {
               receiveListener.onFailure(
-                new IOException(this + "RDMA Receive WR completed with error: " +
+                new IOException(this + "RDMA Receive WR " + ibvWCs[i].getWr_id() +
+                  " completed with error: " +
                   IbvWC.IbvWcStatus.values()[ibvWCs[i].getStatus()]));
             }
 
             reclaimedRecvWrs += 1;
           } else if (ibvWCs[i].getOpcode() ==
-              IbvWC.IbvWcOpcode.IBV_WC_RECV_RDMA_WITH_IMM.getOpcode()) {
+            IbvWC.IbvWcOpcode.IBV_WC_RECV_RDMA_WITH_IMM.getOpcode() &&
+            ibvWCs[i].getImm_data() <= 65536) {
+
             // Receive credit report - update new credits
             if (remoteRecvCredits != null) {
               remoteRecvCredits.release(ibvWCs[i].getImm_data());
+            }
+            int recvWrId = (int)ibvWCs[i].getWr_id();
+            if (firstRecvWrIndex == -1) {
+              firstRecvWrIndex = recvWrId;
+            }
+            reclaimedRecvWrs += 1;
+          } else if (ibvWCs[i].getOpcode() ==
+            IbvWC.IbvWcOpcode.IBV_WC_RECV_RDMA_WITH_IMM.getOpcode()) {
+
+            RdmaCompletionListener listener =
+              completionListenerMap.remove(ibvWCs[i].getImm_data());
+
+            if (listener != null) {
+              if (wcSuccess) {
+                listener.onSuccess(ByteBuffer.allocate(4).putInt(ibvWCs[i].getImm_data()));
+              } else {
+                listener.onFailure(
+                  new IOException("RDMA Send/Write/Read WR completed with error: " +
+                    IbvWC.IbvWcStatus.values()[ibvWCs[i].getStatus()].name()));
+              }
+            }  else if (wcSuccess) {
+              // Ignore the case of error, as the listener will be invoked by the last WC
+              logger.warn("{} Couldn't find RdmaCompletionListener with index: {}", this,
+                ibvWCs[i].getImm_data());
             }
             int recvWrId = (int)ibvWCs[i].getWr_id();
             if (firstRecvWrIndex == -1) {
@@ -778,7 +869,7 @@ public class RdmaChannel {
       }
     }
 
-    if (sendDepth == RECV_CREDIT_REPORT_RATIO) {
+    if (conf.swFlowControl()) {
       // Software-level flow control is enabled
       localRecvCreditsPendingReport += reclaimedRecvWrs;
       if (localRecvCreditsPendingReport > (recvDepth / RECV_CREDIT_REPORT_RATIO)) {
@@ -802,14 +893,14 @@ public class RdmaChannel {
         // more completions coming and they will exhaust the queue later
         if (pendingSend.ibvSendWRList.size() > reclaimedSendPermits) {
           if (!sendBudgetSemaphore.tryAcquire(
-              pendingSend.ibvSendWRList.size() - reclaimedSendPermits)) {
+            pendingSend.ibvSendWRList.size() - reclaimedSendPermits)) {
             sendWrQueue.push(pendingSend);
             sendBudgetSemaphore.release(reclaimedSendPermits);
             break;
           } else {
             if (pendingSend.recvCreditsNeeded > 0 &&
-                remoteRecvCredits != null &&
-                !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
+              remoteRecvCredits != null &&
+              !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
               sendWrQueue.push(pendingSend);
               sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size() + reclaimedSendPermits);
               break;
@@ -819,8 +910,8 @@ public class RdmaChannel {
           }
         } else {
           if (pendingSend.recvCreditsNeeded > 0 &&
-              remoteRecvCredits != null &&
-              !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
+            remoteRecvCredits != null &&
+            !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
             sendWrQueue.push(pendingSend);
             sendBudgetSemaphore.release(reclaimedSendPermits);
             break;
@@ -832,6 +923,7 @@ public class RdmaChannel {
         try {
           rdmaPostWRList(pendingSend.ibvSendWRList);
         } catch (IOException e) {
+          e.printStackTrace();
           setRdmaChannelState(RdmaChannelState.ERROR);
           // reclaim the credit and put sendWRList back to the queue
           // however, the channel/QP is already broken and more actions
@@ -896,7 +988,7 @@ public class RdmaChannel {
         if (ret != 0) {
           logger.error("disconnect failed with errno: " + ret);
         } else if (rdmaChannelType.equals(RdmaChannelType.RPC_REQUESTOR) ||
-            rdmaChannelType.equals(RdmaChannelType.RDMA_READ_REQUESTOR)) {
+          rdmaChannelType.equals(RdmaChannelType.RDMA_READ_REQUESTOR)) {
           try {
             processRdmaCmEvent(RdmaCmEvent.EventType.RDMA_CM_EVENT_DISCONNECTED.ordinal(),
               teardownListenTimeout);

@@ -112,10 +112,10 @@ class RdmaWrapperShuffleWriter[K, V, C](
     if (success) {
       // Publish this map task's RdmaMapTaskOutput to the Driver
       val dep = handle.dependency
-      val rdmaMapTaskOutput = rdmaShuffleBlockResolver.getRdmaShuffleData(dep.shuffleId).
-        asInstanceOf[RdmaWrapperShuffleData].getRdmaMappedFileForMapId(mapId).getRdmaMapTaskOutput
+      // val rdmaMapTaskOutput = rdmaShuffleBlockResolver.getRdmaShuffleData(dep.shuffleId).
+      //  asInstanceOf[RdmaWrapperShuffleData].getRdmaMappedFileForMapId(mapId).getRdmaMapTaskOutput
 
-      rdmaShuffleManager.publishMapTaskOutput(dep.shuffleId, mapId, rdmaMapTaskOutput)
+      // rdmaShuffleManager.publishMapTaskOutput(dep.shuffleId, mapId, rdmaMapTaskOutput)
     }
     writeMetrics.incWriteTime(System.nanoTime - startTime)
     optMapStatus
