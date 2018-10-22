@@ -40,9 +40,9 @@ public class RdmaMappedFile {
   private FileChannel fileChannel;
 
   private final IbvPd ibvPd;
-  private IbvMr odpMr;
 
   private final RdmaMapTaskOutput rdmaMapTaskOutput;
+  private final RdmaBufferManager rdmaBufferManager;
 
   public RdmaMapTaskOutput getRdmaMapTaskOutput() { return rdmaMapTaskOutput; }
 
@@ -79,8 +79,7 @@ public class RdmaMappedFile {
       IllegalAccessException {
     this.file = file;
     this.ibvPd = rdmaBufferManager.getPd();
-    this.odpMr = rdmaBufferManager.getOdpMr();
-
+    this.rdmaBufferManager = rdmaBufferManager;
     final RandomAccessFile backingFile = new RandomAccessFile(file, "rw");
     this.fileChannel = backingFile.getChannel();
 
@@ -135,8 +134,7 @@ public class RdmaMappedFile {
           rdmaMapTaskOutput.put(
             curPartition,
             rdmaFileMapping.address + curLength - partitionLengths[curPartition],
-            (int)partitionLengths[curPartition],
-            (rdmaFileMapping.ibvMr != null) ? rdmaFileMapping.ibvMr.getLkey() : odpMr.getLkey());
+            (int)partitionLengths[curPartition], rdmaFileMapping.ibvMr.getLkey());
           curPartition++;
         }
       }
@@ -157,15 +155,15 @@ public class RdmaMappedFile {
     }
 
     IbvMr ibvMr = null;
-    if (odpMr == null) {
+    if (!rdmaBufferManager.useOdp()) {
       SVCRegMr svcRegMr = ibvPd.regMr(address, (int)length, ACCESS).execute();
       ibvMr = svcRegMr.getMr();
       svcRegMr.free();
     } else {
-      int ret = odpMr.expPrefetchMr(address, (int)length);
-      if (ret != 0) {
-        throw new IOException("expPrefetchMr failed with: " + ret);
-      }
+      SVCRegMr svcRegMr = ibvPd.regMr(address, (int)length,
+        ACCESS | IbvMr.IBV_ACCESS_ON_DEMAND).execute();
+      ibvMr = svcRegMr.getMr();
+      svcRegMr.free();
     }
 
     rdmaFileMappings.add(new RdmaFileMapping(ibvMr, address, mapAddress, length, alignedLength));
