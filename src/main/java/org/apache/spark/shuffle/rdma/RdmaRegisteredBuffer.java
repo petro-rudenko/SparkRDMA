@@ -28,6 +28,18 @@ public class RdmaRegisteredBuffer {
   private final AtomicInteger refCount = new AtomicInteger(0);
   private int blockOffset = 0;
 
+  static final Constructor<?> constructor;
+
+  static {
+    try {
+      Class<?> classDirectByteBuffer = Class.forName("java.nio.DirectByteBuffer");
+      constructor = classDirectByteBuffer.getDeclaredConstructor(long.class, int.class);
+      constructor.setAccessible(true);
+    } catch (Exception e) {
+      throw new RuntimeException("java.nio.DirectByteBuffer class not found");
+    }
+  }
+
   @Override
   public String toString() {
     String addres = (rdmaBuffer == null) ? "null" : Long.toString(getRegisteredAddress());
@@ -82,20 +94,6 @@ public class RdmaRegisteredBuffer {
       throw new IllegalArgumentException("Exceeded Registered Length! blockOffset: " + blockOffset +
         " ,length: " + length + " ,registeredLength: " + getRegisteredLength());
     }
-
-    Class<?> classDirectByteBuffer;
-    try {
-      classDirectByteBuffer = Class.forName("java.nio.DirectByteBuffer");
-    } catch (ClassNotFoundException e) {
-      throw new IOException("java.nio.DirectByteBuffer class not found");
-    }
-    Constructor<?> constructor;
-    try {
-      constructor = classDirectByteBuffer.getDeclaredConstructor(long.class, int.class);
-    } catch (NoSuchMethodException e) {
-      throw new IOException("java.nio.DirectByteBuffer constructor not found");
-    }
-    constructor.setAccessible(true);
     ByteBuffer byteBuffer;
     try {
       byteBuffer = (ByteBuffer)constructor.newInstance(
