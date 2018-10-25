@@ -144,7 +144,7 @@ private[spark] class RdmaShuffleManager(val conf: SparkConf, isDriver: Boolean)
 
           val listener = new RdmaCompletionListener {
             override def onSuccess(buf: ByteBuffer): Unit = {
-              sizeLengthBuffer.free()
+              getRdmaBufferManager.put(sizeLengthBuffer)
               logInfo(s"${channel} RDMA write ${prefetchRpcMsg.callBackId} " +
                 s"${blockLocations.size} blocks " +
                 s"to ${rdmaShuffleManager.blockManagerId} took: ${Utils.getUsedTimeMs(startTime)}")
