@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.LinkedList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 public class RdmaChannel {
   private static final Logger logger = LoggerFactory.getLogger(RdmaChannel.class);
@@ -185,14 +186,17 @@ public class RdmaChannel {
 
       case RDMA_READ_REQUESTOR:
         if (conf.swFlowControl()) {
-          this.recvDepth = RECV_CREDIT_REPORT_RATIO;
+          this.recvDepth = conf.recvQueueDepth();
           this.remoteRecvCredits = new Semaphore(conf.recvQueueDepth(), false);
         } else {
           this.recvDepth = conf.recvQueueDepth();
         }
         this.recvWrSize = 0;
         this.sendDepth = conf.sendQueueDepth();
-        this.sendBudgetSemaphore = new Semaphore(sendDepth, false);
+        logger.trace("{} recvDepth: {} , sendDepth - recvDepth / RECV_CREDIT_REPORT_RATIO:{}",
+          this, recvDepth, sendDepth - recvDepth / RECV_CREDIT_REPORT_RATIO);
+        this.sendBudgetSemaphore = new Semaphore(
+          sendDepth - recvDepth / RECV_CREDIT_REPORT_RATIO, false);
         break;
 
       case RDMA_READ_RESPONDER:
@@ -266,6 +270,7 @@ public class RdmaChannel {
     attr.cap().setMax_send_wr(sendDepth);
 
     qp = cmId.createQP(rdmaBufferManager.getPd(), attr);
+    logger.debug("{} created qp, setMax_send_wr={}", this, sendDepth);
     if (qp == null) {
       throw new IOException("createQP() failed");
     }
@@ -306,7 +311,8 @@ public class RdmaChannel {
       rdmaCmEventTimeout);
 
     setupCommon();
-
+    logger.debug("Created RDMA channel {} of type {} to {}",
+      this, rdmaChannelType.name(), socketAddress.getHostName());
     RdmaConnParam connParams = new RdmaConnParam();
     // TODO: current disni code does not support setting these
     // connParams.setInitiator_depth((byte) 16);
@@ -384,7 +390,15 @@ public class RdmaChannel {
     if (isError() || isStopped.get()) {
       throw new IOException("QP is in error state, can't post new requests");
     }
-
+    if (sendBudgetSemaphore != null) {
+      logger.debug("{} Send budget available permits: {}. \n" +
+          "Sending {} messages of types {}", this, sendBudgetSemaphore.availablePermits(),
+          sendWRList.size(),
+          sendWRList.stream().map(s -> IbvSendWR.IbvWrOcode.values()[s.getOpcode()].name())
+            .distinct().collect(Collectors.joining( "," )));
+    }
+    qp.postSend(sendWRList, null).execute().free();
+    /*
     ConcurrentLinkedDeque<SVCPostSend> stack;
     SVCPostSend svcPostSendObject;
 
@@ -401,6 +415,7 @@ public class RdmaChannel {
     // To avoid buffer allocations in disni update cached SVCPostSendObject
     if (sendWRList.getFirst().getOpcode() == IbvSendWR.IbvWrOcode.IBV_WR_SEND.ordinal()
       && (svcPostSendObject = stack.pollFirst()) != null) {
+      logger.debug("Got Post send from cache");
       int i = 0;
       for (IbvSendWR sendWr: sendWRList) {
         SVCPostSend.SendWRMod sendWrMod = svcPostSendObject.getWrMod(i);
@@ -411,7 +426,7 @@ public class RdmaChannel {
         sendWrMod.getRdmaMod().setRemote_addr(sendWr.getRdma().getRemote_addr());
         sendWrMod.getRdmaMod().setRkey(sendWr.getRdma().getRkey());
         sendWrMod.getRdmaMod().setReserved(sendWr.getRdma().getReserved());
-
+        sendWrMod.setOpcode(sendWr.getOpcode());
         if (sendWr.getNum_sge() == 1) {
           IbvSge sge = sendWr.getSge(0);
           sendWrMod.getSgeMod(0).setLkey(sge.getLkey());
@@ -431,7 +446,7 @@ public class RdmaChannel {
       stack.add(svcPostSendObject);
     } else {
       svcPostSendObject.free();
-    }
+    }*/
   }
 
   private void rdmaPostWRListInQueue(PendingSend pendingSend) throws IOException {
@@ -452,6 +467,8 @@ public class RdmaChannel {
         try {
           rdmaPostWRList(pendingSend.ibvSendWRList);
         } catch (Exception e) {
+          logger.error("{}: Exception: {}, pending send size {}, sendBudget {}",
+            this, e, pendingSend.ibvSendWRList.size(), sendBudgetSemaphore.availablePermits());
           if (remoteRecvCredits != null) {
             remoteRecvCredits.release(pendingSend.recvCreditsNeeded);
           }
@@ -493,7 +510,9 @@ public class RdmaChannel {
           sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size());
         }
       } else {
-        logger.debug("sendWrQueue size: {}", sendWrQueue.size());
+        logger.debug("{} sendBudgetSemaphore size: {}," +
+          "sendWrQueue size: {}", this, sendBudgetSemaphore.availablePermits(),
+          sendWrQueue.size());
       }
     }
   }
@@ -670,6 +689,7 @@ public class RdmaChannel {
     sendWr.setSend_flags(IbvSendWR.IBV_SEND_SIGNALED);
     sendWr.setWr_id(NOOP_RESERVED_INDEX); // doesn't require a callback
     sendWRList.add(sendWr);
+    logger.trace("{} sending IMM message! Not counting in semaphore", this);
     rdmaPostWRList(sendWRList);
   }
 
@@ -786,6 +806,7 @@ public class RdmaChannel {
                 }
 
                 reclaimedSendPermits += completionInfo.sendPermitsToReclaim;
+                logger.trace("{} reclaimedSendPermits = {}", this, reclaimedSendPermits);
               } else if (wcSuccess) {
                 // Ignore the case of error, as the listener will be invoked by the last WC
                 logger.warn("Couldn't find CompletionInfo with index: " + completionInfoId);
@@ -832,7 +853,7 @@ public class RdmaChannel {
 
             if (listener != null) {
               if (wcSuccess) {
-                listener.onSuccess(ByteBuffer.allocate(4).putInt(ibvWCs[i].getImm_data()));
+                listener.onSuccess(null);
               } else {
                 listener.onFailure(
                   new IOException("RDMA Send/Write/Read WR completed with error: " +
@@ -896,6 +917,7 @@ public class RdmaChannel {
             pendingSend.ibvSendWRList.size() - reclaimedSendPermits)) {
             sendWrQueue.push(pendingSend);
             sendBudgetSemaphore.release(reclaimedSendPermits);
+
             break;
           } else {
             if (pendingSend.recvCreditsNeeded > 0 &&
@@ -906,6 +928,7 @@ public class RdmaChannel {
               break;
             } else {
               reclaimedSendPermits = 0;
+              logger.trace("{} reclaimed send permits = 0", this);
             }
           }
         } else {
@@ -917,12 +940,19 @@ public class RdmaChannel {
             break;
           } else {
             reclaimedSendPermits -= pendingSend.ibvSendWRList.size();
+            logger.trace("{} reclaimed send permits = {}, available permits = {}",
+              this, reclaimedSendPermits, sendBudgetSemaphore.availablePermits());
           }
         }
 
         try {
+          logger.debug("{} rdmaPostWRList({})", this, pendingSend.ibvSendWRList.size());
           rdmaPostWRList(pendingSend.ibvSendWRList);
         } catch (IOException e) {
+          logger.error("{} Failed rdmaPostWRList of size {}, {}, " +
+            "reclaimed permits {}, available permits {}", this, pendingSend.ibvSendWRList.size(),
+            e.getMessage(),
+            reclaimedSendPermits, sendBudgetSemaphore.availablePermits());
           e.printStackTrace();
           setRdmaChannelState(RdmaChannelState.ERROR);
           // reclaim the credit and put sendWRList back to the queue
@@ -945,7 +975,7 @@ public class RdmaChannel {
 
   boolean processCompletions() throws IOException {
     // Disni's API uses a CQ here, which is wrong
-    boolean success = compChannel.getCqEvent(cq, 50);
+    boolean success = compChannel.getCqEvent(cq, 5);
     if (success) {
       ackCounter++;
       if (ackCounter == MAX_ACK_COUNT) {

@@ -155,10 +155,9 @@ private[spark] class RdmaShuffleManager(val conf: SparkConf, isDriver: Boolean)
               logError(s"Failed to RDMA write blocks: ${exception}")
             }
           }
-
           channel.rdmaWriteInQueueWithImm(listener, addresses,
             lengths, keys,
-            prefetchRpcMsg.resultBuffer.address, prefetchRpcMsg.resultBuffer.mKey,
+            prefetchRpcMsg.resultBuffer._1, prefetchRpcMsg.resultBuffer._2,
             prefetchRpcMsg.callBackId)
 
         case _ => logWarning("Receive RdmaCompletionListener encountered an unidentified RPC")

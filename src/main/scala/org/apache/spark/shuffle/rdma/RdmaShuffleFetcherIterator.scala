@@ -23,7 +23,6 @@ import java.util.Comparator
 import java.util.concurrent.{LinkedBlockingQueue, PriorityBlockingQueue, ThreadLocalRandom}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 
-import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.{SparkEnv, TaskContext}
@@ -118,23 +117,20 @@ private[spark] final class RdmaShuffleFetcherIterator(
                                         Seq[(BlockManagerId, Seq[(BlockId, Long)])]): Unit = {
     for ((blockManagerId, blocks) <- groupedBlocksByAddress) {
       var totalLength = 0L
-      var numBlocks = 0
       var blocksToFecth = new ArrayBuffer[MapIdReduceId]
       val allowedMsgSize = rdmaShuffleConf.recvWrSize - 32 -
         RdmaShuffleManagerId.serializedLength(blockManagerId)
       for (block <- blocks) {
         if (totalLength >= rdmaShuffleConf.shuffleReadBlockSize ||
-          (numBlocks + 1) * 12 >= allowedMsgSize) {
+          (blocksToFecth.size + 1) * 12 >= allowedMsgSize) {
           val pendingFetch = PendingFetch(blockManagerId, blocksToFecth, totalLength)
           pendingFetchesQueue.add(pendingFetch)
           blocksToFecth = new ArrayBuffer[MapIdReduceId]
-          numBlocks = 0
           totalLength = 0L
         }
         val shuffleBlockId = block._1.asInstanceOf[ShuffleBlockId]
         blocksToFecth += MapIdReduceId(shuffleBlockId.mapId, shuffleBlockId.reduceId)
         totalLength += block._2
-        numBlocks += 1
       }
       if (!blocksToFecth.isEmpty) {
         val pendingFetch = PendingFetch(blockManagerId, blocksToFecth, totalLength)
@@ -145,33 +141,27 @@ private[spark] final class RdmaShuffleFetcherIterator(
 
   private[this] def sendPrefetchMsg(): Unit = {
     val pendingFetch = pendingFetchesQueue.poll()
+    val channel = rdmaShuffleManager.getRdmaChannel(
+      rdmaShuffleManager.blockManagerIdToRdmaShuffleManagerId(pendingFetch.blockManagerId), true)
     if (pendingFetch == null) return
     curBytesInFlight.addAndGet(pendingFetch.totalLength)
     val blocks = pendingFetch.blocksTofetch
-    val channel = rdmaShuffleManager.getRdmaChannel(
-      rdmaShuffleManager.blockManagerIdToRdmaShuffleManagerId(pendingFetch.blockManagerId), true)
     val totalBufferSize = (pendingFetch.totalLength.toInt * 2.5).toInt
     val TOTAL_BUFFER_SIZE = totalBufferSize + 4 * blocks.size
     val rdmaRegisteredBuffer: RdmaRegisteredBuffer =
       rdmaShuffleManager.getRdmaRegisteredBuffer(TOTAL_BUFFER_SIZE)
     val startRemoteFetchTime = System.currentTimeMillis()
+    val blocksSize = blocks.size
+
     val rdmaWriteListener: RdmaCompletionListener = new RdmaCompletionListener {
       override def onSuccess(paramBuf: ByteBuffer): Unit = {
         curBytesInFlight.addAndGet(-pendingFetch.totalLength)
-        val actualBlockLengths = rdmaRegisteredBuffer.getByteBuffer(4 * blocks.size)
-        val rdmaByteBufferManagedBuffers = try {
-          blocks.map(b => {
+        val actualBlockLengths = rdmaRegisteredBuffer.getByteBuffer(4 * blocksSize)
+        val rdmaByteBufferManagedBuffers = (0 until blocksSize).map(_ => {
             val actualBlockSize = actualBlockLengths.getInt()
             new RdmaByteBufferManagedBuffer(rdmaRegisteredBuffer, actualBlockSize)
           })
-        } catch {
-          case e: Exception =>
-            // if (rdmaRegisteredBuffer != null) rdmaRegisteredBuffer.release()
-            logError("Failed to allocate memory for incoming block fetches, failing pending" +
-              " block fetches. " + e)
-            resultsQueue.put(FailureFetchResult(startPartition, null, e))
-            throw e
-        }
+
         rdmaByteBufferManagedBuffers.foreach { buf =>
           if (!isStopped) {
             val inputStream = new BufferReleasingInputStream(buf.createInputStream(), buf)
@@ -185,9 +175,7 @@ private[spark] final class RdmaShuffleFetcherIterator(
           rdmaShuffleReaderStats.updateRemoteFetchHistogram(pendingFetch.blockManagerId,
             (System.currentTimeMillis() - startRemoteFetchTime).toInt)
         }
-        paramBuf.clear()
-        val callbackId = paramBuf.getInt()
-        logTrace(s"callbackId: $callbackId: Got ${blocks.size} " +
+        logTrace(s"Got ${blocksSize} " +
           s"remote block(s): of size ${totalBufferSize} " +
           s"from ${pendingFetch.blockManagerId} " +
           s"after ${Utils.getUsedTimeMs(startRemoteFetchTime)}")
@@ -206,8 +194,8 @@ private[spark] final class RdmaShuffleFetcherIterator(
     val callbackId = channel.putCompletionListener(rdmaWriteListener)
 
     val msg = new RdmaWriteBlocks(callbackId, blocks.size, shuffleId,
-      RdmaBlockLocation(rdmaRegisteredBuffer.getRegisteredAddress, TOTAL_BUFFER_SIZE,
-        rdmaRegisteredBuffer.getLkey), rdmaShuffleManager.getLocalRdmaShuffleManagerId, blocks)
+      (rdmaRegisteredBuffer.getRegisteredAddress, rdmaRegisteredBuffer.getLkey),
+      rdmaShuffleManager.getLocalRdmaShuffleManagerId, blocks)
     val prefetchMsgBuffers = msg.
       toRdmaByteBufferManagedBuffers(rdmaShuffleManager.getRdmaByteBufferManagedBuffer,
         rdmaShuffleConf.recvWrSize)
@@ -221,6 +209,7 @@ private[spark] final class RdmaShuffleFetcherIterator(
 
       override def onFailure(exception: Throwable): Unit = {
         logError(s"Failed to send prefetch Message ${exception}")
+        exception.printStackTrace()
         prefetchMsgBuffers.foreach(_.release())
       }
     }

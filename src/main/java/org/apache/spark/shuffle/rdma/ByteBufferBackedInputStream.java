@@ -28,7 +28,7 @@ public class ByteBufferBackedInputStream extends InputStream {
     this.buf = buf;
   }
 
-  public int read() throws IOException {
+  public int read() {
     if (!buf.hasRemaining()) {
       return -1;
     }

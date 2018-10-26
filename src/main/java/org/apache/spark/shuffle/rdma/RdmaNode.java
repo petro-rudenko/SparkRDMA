@@ -146,15 +146,8 @@ class RdmaNode {
               }
             }
 
-            RdmaChannel.RdmaChannelType rdmaChannelType;
-            if (driverInetAddress.equals(inetSocketAddress.getAddress()) ||
-              driverInetAddress.equals(localInetSocketAddress.getAddress())) {
-              // RPC communication is limited to driver<->executor only
-              rdmaChannelType = RdmaChannel.RdmaChannelType.RPC_RESPONDER;
-            } else {
-              rdmaChannelType = RdmaChannel.RdmaChannelType.RDMA_READ_RESPONDER;
-            }
-
+            RdmaChannel.RdmaChannelType rdmaChannelType =
+              RdmaChannel.RdmaChannelType.RDMA_READ_RESPONDER;
             rdmaChannel = new RdmaChannel(rdmaChannelType, conf, rdmaBufferManager, receiveListener,
               cmId, getNextCpuVector());
             if (passiveRdmaChannelMap.putIfAbsent(inetSocketAddress, rdmaChannel) != null) {
@@ -287,14 +280,8 @@ class RdmaNode {
     do {
       rdmaChannel = activeRdmaChannelMap.get(remoteAddr);
       if (rdmaChannel == null) {
-        RdmaChannel.RdmaChannelType rdmaChannelType;
-        if (driverInetAddress.equals(remoteAddr.getAddress()) ||
-          driverInetAddress.equals(localInetSocketAddress.getAddress())) {
-          // RPC communication is limited to driver<->executor only
-          rdmaChannelType = RdmaChannel.RdmaChannelType.RPC_REQUESTOR;
-        } else {
-          rdmaChannelType = RdmaChannel.RdmaChannelType.RDMA_READ_REQUESTOR;
-        }
+        RdmaChannel.RdmaChannelType rdmaChannelType =
+          RdmaChannel.RdmaChannelType.RDMA_READ_REQUESTOR;
 
         rdmaChannel = new RdmaChannel(rdmaChannelType, conf, rdmaBufferManager, null,
           getNextCpuVector());

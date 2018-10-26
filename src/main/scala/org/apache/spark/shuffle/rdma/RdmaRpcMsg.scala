@@ -181,7 +181,7 @@ case class MapIdReduceId(mapId: Int, reduceId: Int)
 case class RdmaWriteBlocks(var callBackId: Int,
                       var nBlocks: Int,
                       var shuffleId: Int,
-                      var resultBuffer: RdmaBlockLocation,
+                      var resultBuffer: (Long, Int),
                       var rdmaShuffleManagerId: RdmaShuffleManagerId,
                       var blocks: Seq[MapIdReduceId])
   extends RdmaRpcMsg {
@@ -190,7 +190,7 @@ case class RdmaWriteBlocks(var callBackId: Int,
   override protected def msgType: RdmaRpcMsgType = RdmaRpcMsgType.RdmaPrefetchRPCMessage
 
   override protected def getLengthInSegments(segmentSize: Int): Array[Int] = {
-    val msgSize = 28 + rdmaShuffleManagerId.serializedLength + 8 * blocks.size
+    val msgSize = 24 + rdmaShuffleManagerId.serializedLength + 8 * blocks.size
     require(msgSize <= segmentSize,
       s"Message size: $msgSize is greater than segment size $segmentSize")
     Array.fill(1) { msgSize }
@@ -203,9 +203,8 @@ case class RdmaWriteBlocks(var callBackId: Int,
     curOut._1.writeInt(callBackId)
     curOut._1.writeInt(nBlocks)
     curOut._1.writeInt(shuffleId)
-    curOut._1.writeLong(resultBuffer.address)
-    curOut._1.writeInt(resultBuffer.length)
-    curOut._1.writeInt(resultBuffer.mKey)
+    curOut._1.writeLong(resultBuffer._1)
+    curOut._1.writeInt(resultBuffer._2)
     rdmaShuffleManagerId.write(curOut._1)
 
     for (block <- blocks) {
@@ -219,9 +218,8 @@ case class RdmaWriteBlocks(var callBackId: Int,
     nBlocks = in.readInt()
     shuffleId = in.readInt()
     val address = in.readLong()
-    val length = in.readInt()
     val key = in.readInt()
-    resultBuffer = RdmaBlockLocation(address, length, key)
+    resultBuffer = (address, key)
     rdmaShuffleManagerId = RdmaShuffleManagerId(in)
     val tmpBlocks = new ArrayBuffer[MapIdReduceId]
     scala.util.control.Exception.ignoring(classOf[EOFException]) {
