@@ -52,11 +52,12 @@ class RdmaNode {
   private InetAddress driverInetAddress;
   private final ArrayList<Integer> cpuArrayList = new ArrayList<>();
   private int cpuIndex = 0;
+  private final RdmaCompletionListener receiveListener;
 
   RdmaNode(String hostName, boolean isExecutor, final RdmaShuffleConf conf,
            final RdmaCompletionListener receiveListener) throws Exception {
     this.conf = conf;
-
+    this.receiveListener = receiveListener;
     try {
       driverInetAddress = InetAddress.getByName(conf.driverHost());
 
@@ -127,7 +128,7 @@ class RdmaNode {
           int eventType = event.getEvent();
           event.ackEvent();
 
-          InetSocketAddress inetSocketAddress = (InetSocketAddress)cmId.getDestination();
+          InetSocketAddress inetSocketAddress = (InetSocketAddress) cmId.getDestination();
 
           if (eventType == RdmaCmEvent.EventType.RDMA_CM_EVENT_CONNECT_REQUEST.ordinal()) {
             RdmaChannel rdmaChannel = passiveRdmaChannelMap.get(inetSocketAddress);
@@ -146,14 +147,25 @@ class RdmaNode {
               }
             }
 
-            RdmaChannel.RdmaChannelType rdmaChannelType =
-              RdmaChannel.RdmaChannelType.RDMA_READ_RESPONDER;
+            RdmaChannel.RdmaChannelType rdmaChannelType;
+            if (!isExecutor) {
+              rdmaChannelType = RdmaChannel.RdmaChannelType.RPC;
+            } else {
+              rdmaChannelType = RdmaChannel.RdmaChannelType.RDMA_READ_RESPONDER;
+            }
+
             rdmaChannel = new RdmaChannel(rdmaChannelType, conf, rdmaBufferManager, receiveListener,
               cmId, getNextCpuVector());
             if (passiveRdmaChannelMap.putIfAbsent(inetSocketAddress, rdmaChannel) != null) {
               logger.warn("Race in creating an RDMA Channel for " + inetSocketAddress);
               rdmaChannel.stop();
               continue;
+            }
+            if (!isExecutor) {
+              RdmaChannel previous = activeRdmaChannelMap.put(inetSocketAddress, rdmaChannel);
+              if (previous != null) {
+                previous.stop();
+              }
             }
 
             try {
@@ -266,10 +278,12 @@ class RdmaNode {
     return cpuArrayList.get(cpuIndex++ % cpuArrayList.size());
   }
 
-  public RdmaBufferManager getRdmaBufferManager() { return rdmaBufferManager; }
+  public RdmaBufferManager getRdmaBufferManager() {
+    return rdmaBufferManager;
+  }
 
-  public RdmaChannel getRdmaChannel(InetSocketAddress remoteAddr, boolean mustRetry)
-    throws IOException, InterruptedException {
+  public RdmaChannel getRdmaChannel(InetSocketAddress remoteAddr, boolean mustRetry,
+      RdmaChannel.RdmaChannelType rdmaChannelType) throws IOException, InterruptedException {
     final long startTime = System.nanoTime();
     final int maxConnectionAttempts = conf.maxConnectionAttempts();
     final long connectionTimeout = maxConnectionAttempts * conf.rdmaCmEventTimeout();
@@ -280,10 +294,12 @@ class RdmaNode {
     do {
       rdmaChannel = activeRdmaChannelMap.get(remoteAddr);
       if (rdmaChannel == null) {
-        RdmaChannel.RdmaChannelType rdmaChannelType =
-          RdmaChannel.RdmaChannelType.RDMA_READ_REQUESTOR;
-
-        rdmaChannel = new RdmaChannel(rdmaChannelType, conf, rdmaBufferManager, null,
+        RdmaCompletionListener listener = null;
+        if (rdmaChannelType == RdmaChannel.RdmaChannelType.RPC) {
+          // Executor <-> Driver QP needs listeners on both sides.
+          listener = receiveListener;
+        }
+        rdmaChannel = new RdmaChannel(rdmaChannelType, conf, rdmaBufferManager, listener,
           getNextCpuVector());
 
         RdmaChannel actualRdmaChannel = activeRdmaChannelMap.putIfAbsent(remoteAddr, rdmaChannel);
@@ -355,13 +371,13 @@ class RdmaNode {
   void stop() throws Exception {
     // Spawn simultaneous disconnect tasks to speed up tear-down
     LinkedList<FutureTask<Void>> futureTaskList = new LinkedList<>();
-    for (InetSocketAddress inetSocketAddress: activeRdmaChannelMap.keySet()) {
+    for (InetSocketAddress inetSocketAddress : activeRdmaChannelMap.keySet()) {
       final RdmaChannel rdmaChannel = activeRdmaChannelMap.remove(inetSocketAddress);
       futureTaskList.add(createFutureChannelStopTask(rdmaChannel));
     }
 
     // Wait for all of the channels to disconnect
-    for (FutureTask<Void> futureTask: futureTaskList) {
+    for (FutureTask<Void> futureTask : futureTaskList) {
       try {
         futureTask.get(conf.teardownListenTimeout(), TimeUnit.MILLISECONDS);
       } catch (TimeoutException e) {
@@ -371,17 +387,19 @@ class RdmaNode {
       }
     }
 
-    if (runThread.getAndSet(false)) { listeningThread.join(conf.teardownListenTimeout()); }
+    if (runThread.getAndSet(false)) {
+      listeningThread.join(conf.teardownListenTimeout());
+    }
 
     // Spawn simultaneous disconnect tasks to speed up tear-down
     futureTaskList = new LinkedList<>();
-    for (InetSocketAddress inetSocketAddress: passiveRdmaChannelMap.keySet()) {
+    for (InetSocketAddress inetSocketAddress : passiveRdmaChannelMap.keySet()) {
       final RdmaChannel rdmaChannel = passiveRdmaChannelMap.remove(inetSocketAddress);
       futureTaskList.add(createFutureChannelStopTask(rdmaChannel));
     }
 
     // Wait for all of the channels to disconnect
-    for (FutureTask<Void> futureTask: futureTaskList) {
+    for (FutureTask<Void> futureTask : futureTaskList) {
       try {
         futureTask.get(conf.teardownListenTimeout(), TimeUnit.MILLISECONDS);
       } catch (TimeoutException e) {
@@ -391,11 +409,21 @@ class RdmaNode {
       }
     }
 
-    if (rdmaBufferManager != null) { rdmaBufferManager.stop(); }
-    if (ibvPd != null) { ibvPd.deallocPd(); }
-    if (listenerRdmaCmId != null) { listenerRdmaCmId.destroyId(); }
-    if (cmChannel != null) { cmChannel.destroyEventChannel(); }
+    if (rdmaBufferManager != null) {
+      rdmaBufferManager.stop();
+    }
+    if (ibvPd != null) {
+      ibvPd.deallocPd();
+    }
+    if (listenerRdmaCmId != null) {
+      listenerRdmaCmId.destroyId();
+    }
+    if (cmChannel != null) {
+      cmChannel.destroyEventChannel();
+    }
   }
 
-  public InetSocketAddress getLocalInetSocketAddress() { return localInetSocketAddress; }
+  public InetSocketAddress getLocalInetSocketAddress() {
+    return localInetSocketAddress;
+  }
 }

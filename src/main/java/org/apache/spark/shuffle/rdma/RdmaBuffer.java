@@ -39,14 +39,14 @@ class RdmaBuffer {
   private final MemoryBlock block;
   private AtomicInteger refCount;
 
-  static final Constructor<?> constructor;
   static final UnsafeMemoryAllocator unsafeAlloc = new UnsafeMemoryAllocator();
+  public static final Constructor<?> directBufferConstructor;
 
   static {
     try {
       Class<?> classDirectByteBuffer = Class.forName("java.nio.DirectByteBuffer");
-      constructor = classDirectByteBuffer.getDeclaredConstructor(long.class, int.class);
-      constructor.setAccessible(true);
+      directBufferConstructor = classDirectByteBuffer.getDeclaredConstructor(long.class, int.class);
+      directBufferConstructor.setAccessible(true);
     } catch (Exception e) {
       throw new RuntimeException("java.nio.DirectByteBuffer class not found");
     }
@@ -141,7 +141,7 @@ class RdmaBuffer {
 
   ByteBuffer getByteBuffer() throws IOException {
     try {
-      return (ByteBuffer)constructor.newInstance(getAddress(), getLength());
+      return (ByteBuffer)directBufferConstructor.newInstance(getAddress(), getLength());
     } catch (Exception e) {
       throw new IOException("java.nio.DirectByteBuffer exception: " + e.toString());
     }

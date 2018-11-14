@@ -18,34 +18,14 @@
 package org.apache.spark.shuffle.rdma;
 
 import java.io.IOException;
-import java.lang.reflect.Constructor;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class RdmaRegisteredBuffer {
-  private RdmaBufferManager rdmaBufferManager = null;
+  private final RdmaBufferManager rdmaBufferManager;
   private RdmaBuffer rdmaBuffer;
   private final AtomicInteger refCount = new AtomicInteger(0);
   private int blockOffset = 0;
-
-  static final Constructor<?> constructor;
-
-  static {
-    try {
-      Class<?> classDirectByteBuffer = Class.forName("java.nio.DirectByteBuffer");
-      constructor = classDirectByteBuffer.getDeclaredConstructor(long.class, int.class);
-      constructor.setAccessible(true);
-    } catch (Exception e) {
-      throw new RuntimeException("java.nio.DirectByteBuffer class not found");
-    }
-  }
-
-  @Override
-  public String toString() {
-    String addres = (rdmaBuffer == null) ? "null" : Long.toString(getRegisteredAddress());
-    return "RdmaRegisteredBuffer(blockOffset=" + blockOffset + "address=" +
-      addres + ")";
-  }
 
   public RdmaRegisteredBuffer(RdmaBufferManager rdmaBufferManager, int length)
       throws IOException {
@@ -91,12 +71,12 @@ public class RdmaRegisteredBuffer {
 
   ByteBuffer getByteBuffer(int length) throws IOException {
     if (blockOffset + length > getRegisteredLength()) {
-      throw new IllegalArgumentException("Exceeded Registered Length! blockOffset: " + blockOffset +
-        " ,length: " + length + " ,registeredLength: " + getRegisteredLength());
+      throw new IllegalArgumentException("Exceeded Registered Length!");
     }
+
     ByteBuffer byteBuffer;
     try {
-      byteBuffer = (ByteBuffer)constructor.newInstance(
+      byteBuffer = (ByteBuffer)RdmaBuffer.directBufferConstructor.newInstance(
         getRegisteredAddress() + (long)blockOffset, length);
       blockOffset += length;
     } catch (Exception e) {

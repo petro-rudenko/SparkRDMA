@@ -48,7 +48,7 @@ public class RdmaChannel {
   private final ConcurrentHashMap<Integer, ConcurrentLinkedDeque<SVCPostSend>> svcPostSendCache =
     new ConcurrentHashMap();
 
-  enum RdmaChannelType { RPC_REQUESTOR, RPC_RESPONDER, RDMA_READ_REQUESTOR, RDMA_READ_RESPONDER }
+  enum RdmaChannelType { RPC, RDMA_READ_REQUESTOR, RDMA_READ_RESPONDER }
   private final RdmaChannelType rdmaChannelType;
 
   private final RdmaCompletionListener receiveListener;
@@ -135,7 +135,7 @@ public class RdmaChannel {
   // NOOP_RESERVED_INDEX is used for send operations that do not require a callback
   private static final int NOOP_RESERVED_INDEX = 0;
   private final AtomicInteger completionInfoIndex = new AtomicInteger(NOOP_RESERVED_INDEX);
-  private RdmaShuffleConf conf = null;
+  private final RdmaShuffleConf conf;
 
   RdmaChannel(
     RdmaChannelType rdmaChannelType,
@@ -160,30 +160,17 @@ public class RdmaChannel {
     this.cpuVector = cpuVector;
     this.conf = conf;
     switch (rdmaChannelType) {
-      case RPC_REQUESTOR:
-        // Requires full-size sends, and receives for credit reports only
+      case RPC:
+        // Single bidirectional QP between executors and driver.
         if (conf.swFlowControl()) {
-          this.recvDepth = RECV_CREDIT_REPORT_RATIO;
           this.remoteRecvCredits = new Semaphore(conf.recvQueueDepth(), false);
-        } else {
-          this.recvDepth = 0;
         }
-        this.recvWrSize = 0;
-        this.sendDepth = conf.sendQueueDepth();
-        this.sendBudgetSemaphore = new Semaphore(sendDepth, false);
-        break;
-
-      case RPC_RESPONDER:
-        // Requires full-size receives and sends for credit reports only
         this.recvDepth = conf.recvQueueDepth();
         this.recvWrSize = conf.recvWrSize();
-        if (conf.swFlowControl()) {
-          this.sendDepth = RECV_CREDIT_REPORT_RATIO;
-        } else {
-          this.sendDepth = 0;
-        }
+        this.sendDepth = conf.sendQueueDepth();
+        this.sendBudgetSemaphore = new Semaphore(
+          sendDepth - recvDepth / RECV_CREDIT_REPORT_RATIO, false);
         break;
-
       case RDMA_READ_REQUESTOR:
         if (conf.swFlowControl()) {
           this.recvDepth = conf.recvQueueDepth();
@@ -193,14 +180,12 @@ public class RdmaChannel {
         }
         this.recvWrSize = 0;
         this.sendDepth = conf.sendQueueDepth();
-        logger.trace("{} recvDepth: {} , sendDepth - recvDepth / RECV_CREDIT_REPORT_RATIO:{}",
-          this, recvDepth, sendDepth - recvDepth / RECV_CREDIT_REPORT_RATIO);
-        this.sendBudgetSemaphore = new Semaphore(
-          sendDepth - recvDepth / RECV_CREDIT_REPORT_RATIO, false);
+        logger.trace("{} recvDepth: {} , sendDepth:{}",
+          this, recvDepth, sendDepth);
+        this.sendBudgetSemaphore = new Semaphore(sendDepth, false);
         break;
 
       case RDMA_READ_RESPONDER:
-        // Requires full-size receives and sends for credit reports only
         this.recvDepth = conf.recvQueueDepth();
         this.recvWrSize = conf.recvWrSize();
         this.sendDepth = conf.sendQueueDepth();
@@ -258,8 +243,6 @@ public class RdmaChannel {
       ibvWCs[i] = new IbvWC();
     }
     svcPollCq = cq.poll(ibvWCs, POLL_CQ_LIST_SIZE);
-    ibvContext.checkResources(Math.max(recvDepth, sendDepth), MAX_SGE_ELEMENTS,
-      (sendDepth + recvDepth) > 0 ? sendDepth + recvDepth : 1);
     IbvQPInitAttr attr = new IbvQPInitAttr();
     attr.setQp_type(IbvQP.IBV_QPT_RC);
     attr.setSend_cq(cq);
@@ -267,7 +250,7 @@ public class RdmaChannel {
     attr.cap().setMax_recv_sge(MAX_SGE_ELEMENTS);
     attr.cap().setMax_recv_wr(recvDepth);
     attr.cap().setMax_send_sge(MAX_SGE_ELEMENTS);
-    attr.cap().setMax_send_wr(sendDepth);
+    attr.cap().setMax_send_wr(sendDepth + recvDepth / RECV_CREDIT_REPORT_RATIO);
 
     qp = cmId.createQP(rdmaBufferManager.getPd(), attr);
     logger.debug("{} created qp, setMax_send_wr={}", this, sendDepth);
@@ -331,6 +314,10 @@ public class RdmaChannel {
     processRdmaCmEvent(RdmaCmEvent.EventType.RDMA_CM_EVENT_ESTABLISHED.ordinal(),
       rdmaCmEventTimeout);
     setRdmaChannelState(RdmaChannelState.CONNECTED);
+  }
+
+  InetSocketAddress getSourceSocketAddress() throws IOException {
+    return (InetSocketAddress)cmId.getSource();
   }
 
   void accept() throws IOException {
@@ -733,11 +720,7 @@ public class RdmaChannel {
       postRecvWrArray[i % recvDepth].buf.limit(recvWrSize);
       recvWrList.add(postRecvWrArray[i % recvDepth].ibvRecvWR);
     }
-
-    SVCPostRecv svcPostRecv = qp.postRecv(recvWrList, null);
-
-    svcPostRecv.execute();
-    svcPostRecv.free();
+    qp.postRecv(recvWrList, null).execute().free();
   }
 
   private void initRecvs() throws IOException {
@@ -1017,8 +1000,8 @@ public class RdmaChannel {
         int ret = cmId.disconnect();
         if (ret != 0) {
           logger.error("disconnect failed with errno: " + ret);
-        } else if (rdmaChannelType.equals(RdmaChannelType.RPC_REQUESTOR) ||
-          rdmaChannelType.equals(RdmaChannelType.RDMA_READ_REQUESTOR)) {
+        } else if (rdmaChannelType.equals(RdmaChannelType.RPC) ||
+            rdmaChannelType.equals(RdmaChannelType.RDMA_READ_REQUESTOR)) {
           try {
             processRdmaCmEvent(RdmaCmEvent.EventType.RDMA_CM_EVENT_DISCONNECTED.ordinal(),
               teardownListenTimeout);

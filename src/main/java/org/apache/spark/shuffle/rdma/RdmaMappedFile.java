@@ -44,18 +44,6 @@ public class RdmaMappedFile {
   private final RdmaMapTaskOutput rdmaMapTaskOutput;
   private final RdmaBufferManager rdmaBufferManager;
 
-  static final Constructor<?> constructor;
-
-  static {
-    try {
-      Class<?> classDirectByteBuffer = Class.forName("java.nio.DirectByteBuffer");
-      constructor = classDirectByteBuffer.getDeclaredConstructor(long.class, int.class);
-      constructor.setAccessible(true);
-    } catch (Exception e) {
-      throw new RuntimeException("java.nio.DirectByteBuffer class not found");
-    }
-  }
-
   public RdmaMapTaskOutput getRdmaMapTaskOutput() { return rdmaMapTaskOutput; }
 
   private class RdmaFileMapping {
@@ -146,7 +134,8 @@ public class RdmaMappedFile {
           rdmaMapTaskOutput.put(
             curPartition,
             rdmaFileMapping.address + curLength - partitionLengths[curPartition],
-            (int)partitionLengths[curPartition], rdmaFileMapping.ibvMr.getLkey());
+            (int)partitionLengths[curPartition],
+            rdmaFileMapping.ibvMr.getLkey());
           curPartition++;
         }
       }
@@ -211,7 +200,7 @@ public class RdmaMappedFile {
 
   private ByteBuffer getByteBuffer(long address, int length) throws IOException {
     try {
-      return (ByteBuffer)constructor.newInstance(address, length);
+      return (ByteBuffer)RdmaBuffer.directBufferConstructor.newInstance(address, length);
     } catch (InvocationTargetException ex) {
       throw new IOException("java.nio.DirectByteBuffer: " +
         "InvocationTargetException: " + ex.getTargetException());

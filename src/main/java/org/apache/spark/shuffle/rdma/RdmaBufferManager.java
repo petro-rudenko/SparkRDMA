@@ -97,7 +97,7 @@ public class RdmaBufferManager {
   private final ConcurrentHashMap<Integer, AllocatorStack> allocStackMap =
     new ConcurrentHashMap<>();
   private IbvPd pd;
-  private boolean useOdp = false;
+  private final boolean useOdp;
   private long maxCacheSize;
   private static final ExecutionContextExecutor globalScalaExecutor =
     ExecutionContext.Implicits$.MODULE$.global();
@@ -107,9 +107,13 @@ public class RdmaBufferManager {
     this.pd = pd;
     this.minimumAllocationSize = Math.min(conf.recvWrSize(), MIN_BLOCK_SIZE);
     this.maxCacheSize = conf.maxBufferAllocationSize();
-    if (conf.useOdp(pd.getContext()) && conf.collectOdpStats()) {
-      odpStats = new OdpStats(conf);
+    if (conf.useOdp(pd.getContext())) {
       useOdp = true;
+      if (conf.collectOdpStats()) {
+        odpStats = new OdpStats(conf);
+      }
+    } else {
+      useOdp = false;
     }
   }
 
