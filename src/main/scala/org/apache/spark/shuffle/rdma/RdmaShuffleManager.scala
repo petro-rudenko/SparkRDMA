@@ -118,21 +118,15 @@ private[spark] class RdmaShuffleManager(val conf: SparkConf, isDriver: Boolean)
           }
         case prefetchRpcMsg: RdmaWriteBlocks =>
           val startTime = System.currentTimeMillis()
-          val blockLocations = prefetchRpcMsg.blocks.map(block => {
-            shuffleBlockResolver.rdmaShuffleDataMap
-              .get(prefetchRpcMsg.shuffleId)
-              .getRdmaMappedFileForMapId(block.mapId).getRdmaMapTaskOutput()
-              .getRdmaBlockLocation(block.reduceId)})
-          val rdmaShuffleManager = prefetchRpcMsg.rdmaShuffleManagerId
-          logInfo(s"Got prefetch msg: ${prefetchRpcMsg.callBackId} from $rdmaShuffleManager")
-
-          val mr = shuffleBlockResolver.rdmaShuffleDataMap
-            .get(prefetchRpcMsg.shuffleId)
-            .getRdmaMappedFileForMapId(prefetchRpcMsg.blocks.head.mapId).getRdmaMapTaskOutput()
-            .getRdmaBuffer.getMr
-          if (getRdmaBufferManager.useOdp()) {
-            blockLocations.foreach(b => mr.expPrefetchMr(b.address, b.length))
+          val groupedByShuffleId = prefetchRpcMsg.blocks.groupBy(x => x.shuffleId)
+          val blockLocations = groupedByShuffleId.flatMap{
+            case (shuffleId, blocks) =>
+              val shuffleDataMap = shuffleBlockResolver.rdmaShuffleDataMap.get(shuffleId)
+              blocks.map(block => shuffleDataMap.getRdmaMappedFileForMapId(block.mapId)
+                .getRdmaMapTaskOutput().getRdmaBlockLocation(block.reduceId))
           }
+          val rdmaShuffleManager = prefetchRpcMsg.rdmaShuffleManagerId
+
           val channel = getRdmaChannel(rdmaShuffleManager, true)
           val sizeLengthBuffer = getRdmaBufferManager.get(blockLocations.size * 4)
           val lengthBuffer = sizeLengthBuffer.getByteBuffer

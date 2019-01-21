@@ -32,7 +32,7 @@ import org.apache.spark.shuffle.sort._
 class RdmaWrapperShuffleData(
     shuffleId: Int,
     numPartitions: Int,
-    rdmaShuffleManager: RdmaShuffleManager) {
+    rdmaShuffleManager: RdmaShuffleManager) extends Logging {
   private val rdmaMappedFileByMapId = new ConcurrentHashMap[Int, RdmaMappedFile].asScala
 
   def getInputStreams(partitionId: Int): Seq[InputStream] = {
@@ -63,8 +63,9 @@ class RdmaWrapperShuffleData(
       }
 
       val rdmaFile = new RdmaMappedFile(dataFile,
-        rdmaShuffleManager.rdmaShuffleConf.shuffleWriteBlockSize.toInt, lengths,
+        rdmaShuffleManager.rdmaShuffleConf, lengths,
         rdmaShuffleManager.getRdmaBufferManager)
+
       // Overwrite and dispose of older file if already exists
       rdmaMappedFileByMapId.put(mapId, rdmaFile).foreach(_.dispose())
     }

@@ -29,12 +29,18 @@ import java.util.List;
 import com.ibm.disni.verbs.IbvMr;
 import com.ibm.disni.verbs.IbvPd;
 import com.ibm.disni.verbs.SVCRegMr;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import sun.nio.ch.FileChannelImpl;
 
 public class RdmaMappedFile {
+  private static final Logger logger = LoggerFactory.getLogger(RdmaMappedFile.class);
   private static final Method mmap;
   private static final Method unmmap;
   private static final int ACCESS = IbvMr.IBV_ACCESS_REMOTE_READ;
+  private static final SparkRdmaNativeInterface nat = new SparkRdmaNativeInterface();
+  private final RandomAccessFile backingFile;
+  private final RdmaShuffleConf conf;
 
   private File file;
   private FileChannel fileChannel;
@@ -74,17 +80,17 @@ public class RdmaMappedFile {
     }
   }
 
-  public RdmaMappedFile(File file, int chunkSize, long[] partitionLengths,
+  public RdmaMappedFile(File file, RdmaShuffleConf conf, long[] partitionLengths,
       RdmaBufferManager rdmaBufferManager) throws IOException, InvocationTargetException,
       IllegalAccessException {
     this.file = file;
     this.ibvPd = rdmaBufferManager.getPd();
     this.rdmaBufferManager = rdmaBufferManager;
-    final RandomAccessFile backingFile = new RandomAccessFile(file, "rw");
+    this.backingFile = new RandomAccessFile(file, "rw");
     this.fileChannel = backingFile.getChannel();
-
+    this.conf = conf;
     rdmaMapTaskOutput = new RdmaMapTaskOutput(0, partitionLengths.length - 1);
-    mapAndRegister(chunkSize, partitionLengths);
+    mapAndRegister((int)conf.shuffleWriteBlockSize(), partitionLengths);
 
     fileChannel.close();
     fileChannel = null;
@@ -147,14 +153,18 @@ public class RdmaMappedFile {
     long distanceFromPageBoundary = fileOffset % 4096;
     long alignedOffset = fileOffset - distanceFromPageBoundary;
     long alignedLength = roundUpTo4096(length + distanceFromPageBoundary);
-    long mapAddress = (long)mmap.invoke(fileChannel, 1, alignedOffset, alignedLength);
+    long mapAddress;
+    if (conf.useNativeInterface()) {
+      mapAddress = nat.map(backingFile.getFD(), alignedOffset, alignedLength);
+    } else {
+      mapAddress = (long)mmap.invoke(fileChannel, 1, alignedOffset, alignedLength);
+    }
     long address = mapAddress + distanceFromPageBoundary;
 
     if (length > Integer.MAX_VALUE) {
       throw new IOException("Registering files larger than " + Integer.MAX_VALUE + "B is not " +
         "supported");
     }
-
     IbvMr ibvMr;
     if (!rdmaBufferManager.useOdp()) {
       SVCRegMr svcRegMr = ibvPd.regMr(address, (int)length, ACCESS).execute();
@@ -174,7 +184,11 @@ public class RdmaMappedFile {
     if (rdmaFileMapping.ibvMr != null) {
       rdmaFileMapping.ibvMr.deregMr().execute().free();
     }
-    unmmap.invoke(null, rdmaFileMapping.mapAddress, rdmaFileMapping.alignedLength);
+    if (conf.useNativeInterface()) {
+      nat.unmap(rdmaFileMapping.mapAddress, rdmaFileMapping.alignedLength);
+    } else {
+      unmmap.invoke(null, rdmaFileMapping.mapAddress, rdmaFileMapping.alignedLength);
+    }
     getRdmaMapTaskOutput().getRdmaBuffer().free();
   }
 

@@ -17,6 +17,7 @@
 
 package org.apache.spark.shuffle.rdma;
 
+import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.memory.MemoryBlock;
 import org.apache.spark.unsafe.memory.UnsafeMemoryAllocator;
 import org.slf4j.Logger;
@@ -71,7 +72,7 @@ class RdmaBuffer {
   }
 
   public void clean() {
-    // Platform.setMemory(address, (byte)0, length);
+    Platform.setMemory(address, (byte)0, length);
   }
 
   /**

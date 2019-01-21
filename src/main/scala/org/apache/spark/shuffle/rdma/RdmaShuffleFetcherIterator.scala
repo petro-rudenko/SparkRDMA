@@ -65,7 +65,7 @@ private[spark] final class RdmaShuffleFetcherIterator(
   private[this] val curBytesInFlight = new AtomicLong(0)
 
   case class PendingFetch(blockManagerId: BlockManagerId,
-                          blocksTofetch: Seq[MapIdReduceId],
+                          blocksTofetch: Seq[ShuffleBlockId],
                           totalLength: Long)
 
   private val groupedBlocksByAddress = blocksByAddress.filter(_._1 != localBlockManagerId).map {
@@ -115,22 +115,29 @@ private[spark] final class RdmaShuffleFetcherIterator(
 
   private[this] def splitPendingFetches(groupedBlocksByAddress:
                                         Seq[(BlockManagerId, Seq[(BlockId, Long)])]): Unit = {
+    val minS = rdmaShuffleConf.getConfKey("spark.shuffle.accurateBlockThreshold", "100000000").toInt
     for ((blockManagerId, blocks) <- groupedBlocksByAddress) {
       var totalLength = 0L
-      var blocksToFecth = new ArrayBuffer[MapIdReduceId]
-      val allowedMsgSize = rdmaShuffleConf.recvWrSize - 32 -
+      var blocksToFecth = new ArrayBuffer[ShuffleBlockId]
+      val allowedMsgSize = rdmaShuffleConf.recvWrSize - 35 -
         RdmaShuffleManagerId.serializedLength(blockManagerId)
       for (block <- blocks) {
         if (totalLength >= rdmaShuffleConf.shuffleReadBlockSize ||
           (blocksToFecth.size + 1) * 12 >= allowedMsgSize) {
           val pendingFetch = PendingFetch(blockManagerId, blocksToFecth, totalLength)
           pendingFetchesQueue.add(pendingFetch)
-          blocksToFecth = new ArrayBuffer[MapIdReduceId]
+          blocksToFecth = new ArrayBuffer[ShuffleBlockId]
           totalLength = 0L
         }
         val shuffleBlockId = block._1.asInstanceOf[ShuffleBlockId]
-        blocksToFecth += MapIdReduceId(shuffleBlockId.mapId, shuffleBlockId.reduceId)
-        totalLength += block._2
+        blocksToFecth += shuffleBlockId
+
+        val blockOverhead = if (block._2 > minS) {
+          (block._2 * 1.15).toLong // Only if block > 100Kb
+        } else {
+          block._2 * 2L // 99K => 50k
+        }
+        totalLength += blockOverhead
       }
       if (!blocksToFecth.isEmpty) {
         val pendingFetch = PendingFetch(blockManagerId, blocksToFecth, totalLength)
@@ -146,7 +153,11 @@ private[spark] final class RdmaShuffleFetcherIterator(
     if (pendingFetch == null) return
     curBytesInFlight.addAndGet(pendingFetch.totalLength)
     val blocks = pendingFetch.blocksTofetch
-    val totalBufferSize = (pendingFetch.totalLength.toInt * 2.5).toInt
+    val totalBufferSize = if (pendingFetch.totalLength > Int.MaxValue) {
+      Int.MaxValue - 1
+    } else {
+      pendingFetch.totalLength.toInt
+    }
     val TOTAL_BUFFER_SIZE = totalBufferSize + 4 * blocks.size
     val rdmaRegisteredBuffer: RdmaRegisteredBuffer =
       rdmaShuffleManager.getRdmaRegisteredBuffer(TOTAL_BUFFER_SIZE)
@@ -193,7 +204,7 @@ private[spark] final class RdmaShuffleFetcherIterator(
 
     val callbackId = channel.putCompletionListener(rdmaWriteListener)
 
-    val msg = new RdmaWriteBlocks(callbackId, blocks.size, shuffleId,
+    val msg = new RdmaWriteBlocks(callbackId, blocks.size,
       (rdmaRegisteredBuffer.getRegisteredAddress, rdmaRegisteredBuffer.getLkey),
       rdmaShuffleManager.getLocalRdmaShuffleManagerId, blocks)
     val prefetchMsgBuffers = msg.

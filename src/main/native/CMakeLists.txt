@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 2.8)
+project(spark-rdma-native)
+set(CMAKE_BUILD_TYPE Release)
+find_package(JNI REQUIRED)
+include_directories(${JNI_INCLUDE_DIRS})
+set(SOURCE_FILES org_apache_spark_shuffle_rdma_SparkRdmaNativeInterface.cpp)
+add_library(spark-rdma-native SHARED ${SOURCE_FILES})

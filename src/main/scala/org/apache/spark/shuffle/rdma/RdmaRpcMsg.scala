@@ -25,6 +25,7 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.shuffle.rdma.RdmaRpcMsgType.RdmaRpcMsgType
+import org.apache.spark.storage.ShuffleBlockId
 
 object RdmaRpcMsgType extends Enumeration {
   type RdmaRpcMsgType = Value
@@ -173,7 +174,6 @@ object RdmaAnnounceRdmaShuffleManagersRpcMsg {
   }
 }
 
-case class MapIdReduceId(mapId: Int, reduceId: Int)
 /**
  * Prefetches blocks for a given reduceId and mapIds
  * @param shuffleId
@@ -182,17 +182,16 @@ case class MapIdReduceId(mapId: Int, reduceId: Int)
  */
 case class RdmaWriteBlocks(var callBackId: Int,
                       var nBlocks: Int,
-                      var shuffleId: Int,
                       var resultBuffer: (Long, Int),
                       var rdmaShuffleManagerId: RdmaShuffleManagerId,
-                      var blocks: Seq[MapIdReduceId])
+                      var blocks: Seq[ShuffleBlockId])
   extends RdmaRpcMsg {
-  private def this() = this(0, 0, 0, null, null, null)  // For deserialization only
+  private def this() = this(0, 0, null, null, null)  // For deserialization only
 
   override protected def msgType: RdmaRpcMsgType = RdmaRpcMsgType.RdmaPrefetchRPCMessage
 
   override protected def getLengthInSegments(segmentSize: Int): Array[Int] = {
-    val msgSize = 24 + rdmaShuffleManagerId.serializedLength + 8 * blocks.size
+    val msgSize = 20 + rdmaShuffleManagerId.serializedLength + 12 * blocks.size
     require(msgSize <= segmentSize,
       s"Message size: $msgSize is greater than segment size $segmentSize")
     Array.fill(1) { msgSize }
@@ -204,12 +203,12 @@ case class RdmaWriteBlocks(var callBackId: Int,
     curOut = outs.next()
     curOut._1.writeInt(callBackId)
     curOut._1.writeInt(nBlocks)
-    curOut._1.writeInt(shuffleId)
     curOut._1.writeLong(resultBuffer._1)
     curOut._1.writeInt(resultBuffer._2)
     rdmaShuffleManagerId.write(curOut._1)
 
     for (block <- blocks) {
+      curOut._1.writeInt(block.shuffleId)
       curOut._1.writeInt(block.mapId)
       curOut._1.writeInt(block.reduceId)
     }
@@ -218,17 +217,17 @@ case class RdmaWriteBlocks(var callBackId: Int,
   override protected def read(in: DataInputStream): Unit = {
     callBackId = in.readInt()
     nBlocks = in.readInt()
-    shuffleId = in.readInt()
     val address = in.readLong()
     val key = in.readInt()
     resultBuffer = (address, key)
     rdmaShuffleManagerId = RdmaShuffleManagerId(in)
-    val tmpBlocks = new ArrayBuffer[MapIdReduceId]
+    val tmpBlocks = new ArrayBuffer[ShuffleBlockId]
     scala.util.control.Exception.ignoring(classOf[EOFException]) {
       while (true) {
+        val shuffleId = in.readInt()
         val mapId = in.readInt()
         val reduceId = in.readInt()
-        tmpBlocks += MapIdReduceId(mapId, reduceId)
+        tmpBlocks += ShuffleBlockId(shuffleId, mapId, reduceId)
       }
     }
     blocks = tmpBlocks

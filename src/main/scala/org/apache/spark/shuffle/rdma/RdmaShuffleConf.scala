@@ -54,13 +54,13 @@ class RdmaShuffleConf(conf: SparkConf) extends Logging{
     defaultValue)
 
   def setDriverPort(value: String): Unit = conf.set(toRdmaConfKey("driverPort"), value)
-
+  lazy val useNativeInterface = conf.getBoolean(toRdmaConfKey("useNative"), true)
   //
   // RDMA resource parameters
   //
   lazy val recvQueueDepth: Int = getRdmaConfIntInRange("recvQueueDepth", 256, 256, 65535)
   lazy val sendQueueDepth: Int = getRdmaConfIntInRange("sendQueueDepth", 4096, 256, 65535)
-  lazy val recvWrSize: Int = getRdmaConfSizeAsBytesInRange("recvWrSize", "4k", "2k", "1m").toInt
+  lazy val recvWrSize: Int = getRdmaConfSizeAsBytesInRange("recvWrSize", "4k", "2k", "100m").toInt
   lazy val swFlowControl: Boolean = conf.getBoolean(toRdmaConfKey("swFlowControl"), true)
   lazy val maxBufferAllocationSize: Long = getRdmaConfSizeAsBytesInRange(
       "maxBufferAllocationSize", "10g", "0", "10t")

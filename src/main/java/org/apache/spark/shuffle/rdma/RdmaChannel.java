@@ -31,7 +31,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.LinkedList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 public class RdmaChannel {
   private static final Logger logger = LoggerFactory.getLogger(RdmaChannel.class);
@@ -40,7 +39,7 @@ public class RdmaChannel {
   private static final int ZERO_SIZED_RECV_WR_LIST_SIZE = 16;
   private static final AtomicInteger idGenerator = new AtomicInteger(Integer.MAX_VALUE);
   private final int id = Integer.MAX_VALUE - idGenerator.decrementAndGet();
-  private static final int MAX_SGE_ELEMENTS = 1;
+  private static final int MAX_SGE_ELEMENTS = 3;
 
   private static final ConcurrentHashMap<Integer, RdmaCompletionListener> completionListenerMap =
     new ConcurrentHashMap<>();
@@ -301,8 +300,8 @@ public class RdmaChannel {
     // connParams.setInitiator_depth((byte) 16);
     // connParams.setResponder_resources((byte) 16);
     // retry infinite
-    connParams.setRetry_count((byte) 1);
-    connParams.setRnr_retry_count((byte) 1);
+    connParams.setRetry_count((byte) 7);
+    connParams.setRnr_retry_count((byte) 7);
 
     try {
       cmId.connect(connParams);
@@ -377,15 +376,7 @@ public class RdmaChannel {
     if (isError() || isStopped.get()) {
       throw new IOException("QP is in error state, can't post new requests");
     }
-    if (sendBudgetSemaphore != null) {
-      logger.debug("{} Send budget available permits: {}. \n" +
-          "Sending {} messages of types {}", this, sendBudgetSemaphore.availablePermits(),
-          sendWRList.size(),
-          sendWRList.stream().map(s -> IbvSendWR.IbvWrOcode.values()[s.getOpcode()].name())
-            .distinct().collect(Collectors.joining( "," )));
-    }
-    qp.postSend(sendWRList, null).execute().free();
-    /*
+
     ConcurrentLinkedDeque<SVCPostSend> stack;
     SVCPostSend svcPostSendObject;
 
@@ -402,7 +393,6 @@ public class RdmaChannel {
     // To avoid buffer allocations in disni update cached SVCPostSendObject
     if (sendWRList.getFirst().getOpcode() == IbvSendWR.IbvWrOcode.IBV_WR_SEND.ordinal()
       && (svcPostSendObject = stack.pollFirst()) != null) {
-      logger.debug("Got Post send from cache");
       int i = 0;
       for (IbvSendWR sendWr: sendWRList) {
         SVCPostSend.SendWRMod sendWrMod = svcPostSendObject.getWrMod(i);
@@ -413,7 +403,6 @@ public class RdmaChannel {
         sendWrMod.getRdmaMod().setRemote_addr(sendWr.getRdma().getRemote_addr());
         sendWrMod.getRdmaMod().setRkey(sendWr.getRdma().getRkey());
         sendWrMod.getRdmaMod().setReserved(sendWr.getRdma().getReserved());
-        sendWrMod.setOpcode(sendWr.getOpcode());
         if (sendWr.getNum_sge() == 1) {
           IbvSge sge = sendWr.getSge(0);
           sendWrMod.getSgeMod(0).setLkey(sge.getLkey());
@@ -433,7 +422,7 @@ public class RdmaChannel {
       stack.add(svcPostSendObject);
     } else {
       svcPostSendObject.free();
-    }*/
+    }
   }
 
   private void rdmaPostWRListInQueue(PendingSend pendingSend) throws IOException {
@@ -496,10 +485,6 @@ public class RdmaChannel {
         } else {
           sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size());
         }
-      } else {
-        logger.debug("{} sendBudgetSemaphore size: {}," +
-          "sendWrQueue size: {}", this, sendBudgetSemaphore.availablePermits(),
-          sendWrQueue.size());
       }
     }
   }
@@ -676,7 +661,7 @@ public class RdmaChannel {
     sendWr.setSend_flags(IbvSendWR.IBV_SEND_SIGNALED);
     sendWr.setWr_id(NOOP_RESERVED_INDEX); // doesn't require a callback
     sendWRList.add(sendWr);
-    logger.trace("{} sending IMM message! Not counting in semaphore", this);
+    // logger.trace("{} sending IMM message! Not counting in semaphore", this);
     rdmaPostWRList(sendWRList);
   }
 
@@ -789,7 +774,7 @@ public class RdmaChannel {
                 }
 
                 reclaimedSendPermits += completionInfo.sendPermitsToReclaim;
-                logger.trace("{} reclaimedSendPermits = {}", this, reclaimedSendPermits);
+                // logger.trace("{} reclaimedSendPermits = {}", this, reclaimedSendPermits);
               } else if (wcSuccess) {
                 // Ignore the case of error, as the listener will be invoked by the last WC
                 logger.warn("Couldn't find CompletionInfo with index: " + completionInfoId);
@@ -890,50 +875,30 @@ public class RdmaChannel {
 
     // Drain pending sends queue
     while (sendBudgetSemaphore != null && !isStopped.get() && !isError()) {
+      sendBudgetSemaphore.release(reclaimedSendPermits);
+      reclaimedSendPermits = 0;
       PendingSend pendingSend = sendWrQueue.poll();
       if (pendingSend != null) {
         // If there are not enough available permits from
         // this run AND from the semaphore, then it means that there are
         // more completions coming and they will exhaust the queue later
-        if (pendingSend.ibvSendWRList.size() > reclaimedSendPermits) {
-          if (!sendBudgetSemaphore.tryAcquire(
-            pendingSend.ibvSendWRList.size() - reclaimedSendPermits)) {
-            sendWrQueue.push(pendingSend);
-            sendBudgetSemaphore.release(reclaimedSendPermits);
-
-            break;
-          } else {
-            if (pendingSend.recvCreditsNeeded > 0 &&
-              remoteRecvCredits != null &&
-              !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
-              sendWrQueue.push(pendingSend);
-              sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size() + reclaimedSendPermits);
-              break;
-            } else {
-              reclaimedSendPermits = 0;
-              logger.trace("{} reclaimed send permits = 0", this);
-            }
-          }
-        } else {
-          if (pendingSend.recvCreditsNeeded > 0 &&
-            remoteRecvCredits != null &&
-            !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
-            sendWrQueue.push(pendingSend);
-            sendBudgetSemaphore.release(reclaimedSendPermits);
-            break;
-          } else {
-            reclaimedSendPermits -= pendingSend.ibvSendWRList.size();
-            logger.trace("{} reclaimed send permits = {}, available permits = {}",
-              this, reclaimedSendPermits, sendBudgetSemaphore.availablePermits());
-          }
+        if (!sendBudgetSemaphore.tryAcquire(pendingSend.ibvSendWRList.size())) {
+          sendWrQueue.push(pendingSend);
+          break;
+        } else if (pendingSend.recvCreditsNeeded > 0 &&
+          remoteRecvCredits != null &&
+          !remoteRecvCredits.tryAcquire(pendingSend.recvCreditsNeeded)) {
+          sendWrQueue.push(pendingSend);
+          sendBudgetSemaphore.release(pendingSend.ibvSendWRList.size());
+          break;
         }
 
         try {
-          logger.debug("{} rdmaPostWRList({})", this, pendingSend.ibvSendWRList.size());
+          // logger.debug("{} rdmaPostWRList({})", this, pendingSend.ibvSendWRList.size());
           rdmaPostWRList(pendingSend.ibvSendWRList);
         } catch (IOException e) {
           logger.error("{} Failed rdmaPostWRList of size {}, {}, " +
-            "reclaimed permits {}, available permits {}", this, pendingSend.ibvSendWRList.size(),
+              "reclaimed permits {}, available permits {}", this, pendingSend.ibvSendWRList.size(),
             e.getMessage(),
             reclaimedSendPermits, sendBudgetSemaphore.availablePermits());
           e.printStackTrace();
@@ -958,7 +923,7 @@ public class RdmaChannel {
 
   boolean processCompletions() throws IOException {
     // Disni's API uses a CQ here, which is wrong
-    boolean success = compChannel.getCqEvent(cq, 5);
+    boolean success = compChannel.getCqEvent(cq, 50);
     if (success) {
       ackCounter++;
       if (ackCounter == MAX_ACK_COUNT) {
