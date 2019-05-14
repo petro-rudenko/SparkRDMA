@@ -6,11 +6,10 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.github.mellanox</groupId>
-  <artifactId>spark-rdma</artifactId>
-  <version>3.1</version>
+  <artifactId>spark-ucx</artifactId>
+  <version>1.0</version>
   <name>${project.artifactId}</name>
-  <description>SparkRDMA Shuffle Manager Plugin</description>
-  <inceptionYear>2017</inceptionYear>
+  <description>SparkUCX Shuffle Manager Plugin</description>
   <packaging>jar</packaging>
 
   <licenses>
@@ -21,13 +20,6 @@
     </license>
   </licenses>
 
-  <developers>
-    <developer>
-      <name>Yuval Degani</name>
-      <email>yuvaldeg@mellanox.com</email>
-    </developer>
-  </developers>
-
   <properties>
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
@@ -37,18 +29,6 @@
   </properties>
 
   <profiles>
-    <profile>
-      <id>spark-2.0.0</id>
-      <properties>
-        <spark.version>2.0.1</spark.version>
-      </properties>
-    </profile>
-    <profile>
-      <id>spark-2.1.0</id>
-      <properties>
-        <spark.version>2.1.0</spark.version>
-      </properties>
-    </profile>
     <profile>
       <id>spark-2.2.0</id>
       <properties>
@@ -77,19 +57,9 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
-      <groupId>com.ibm.disni</groupId>
-      <artifactId>disni</artifactId>
-      <version>1.7</version>
-      <exclusions>
-        <exclusion>
-          <groupId>org.slf4j</groupId>
-          <artifactId>slf4j-log4j12</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>log4j</groupId>
-          <artifactId>log4j</artifactId>
-        </exclusion>
-      </exclusions>
+      <groupId>org.openucx</groupId>
+      <artifactId>jucx</artifactId>
+      <version>1.7.0</version>
     </dependency>
   </dependencies>
 

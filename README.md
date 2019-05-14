@@ -1,6 +1,6 @@
-# SparkRDMA ShuffleManager Plugin
-SparkRDMA is a high performance ShuffleManager plugin for Apache Spark that uses RDMA (instead of TCP) when
-performing Shuffle data transfers in Spark jobs.
+# SparkUCX ShuffleManager Plugin
+SparkUCX is a high performance ShuffleManager plugin for Apache Spark that uses RDMA and other hight performance
+transport, supported by [UCX](https://github.com/openucx/ucx#supported-transports) when performing Shuffle data transfers in Spark jobs.
 
 This open-source project is developed, maintained and supported by [Mellanox Technologies](http://www.mellanox.com).
 
@@ -34,70 +34,47 @@ Mellanox ConnectX-5 network adapter with 100GbE RoCE fabric, connected with a Me
 For more information on configuration, performance tuning and troubleshooting, please visit the [SparkRDMA GitHub Wiki](https://github.com/Mellanox/SparkRDMA/wiki)
 
 ## Runtime requirements
-* Apache Spark 2.0.0/2.1.0/2.2.0/2.3.0/2.4.0
+* Apache Spark 2.2.0/2.3.0/2.4.0
 * Java 8
 * An RDMA-supported network, e.g. RoCE or Infiniband
 
 ## Installation
 
-### Obtain SparkRDMA and DiSNI binaries
+### Obtain SparkRDMA 
 Please use the ["Releases"](https://github.com/Mellanox/SparkRDMA/releases) page to download pre-built binaries.
 <br>If you would like to build the project yourself, please refer to the ["Build"](https://github.com/Mellanox/SparkRDMA#build) section below.
 
-The pre-built binaries are packed as an archive that contains the following files:
-* spark-rdma-3.1-for-spark-2.0.0-jar-with-dependencies.jar
-* spark-rdma-3.1-for-spark-2.1.0-jar-with-dependencies.jar
-* spark-rdma-3.1-for-spark-2.2.0-jar-with-dependencies.jar
-* spark-rdma-3.1-for-spark-2.3.0-jar-with-dependencies.jar
-* spark-rdma-3.1-for-spark-2.4.0-jar-with-dependencies.jar
-* libdisni.so
-
-libdisni.so **must** be in `java.library.path` on every Spark Master and Worker (usually in /usr/lib)
+ucx binaries **must** be in `java.library.path` on every Spark Master and Worker (usually in /usr/lib). It can be obtained by installing latest version of [Mellanox OFED](http://www.mellanox.com/page/products_dyn?product_family=26) or following [ucx build instruction](https://github.com/openucx/ucx#using-ucx).
 
 ### Configuration
 
-Provide Spark the location of the SparkRDMA plugin jars by using the extraClassPath option.  For standalone mode this can
-be added to either spark-defaults.conf or any runtime configuration file.  For client mode this **must** be added to spark-defaults.conf. For Spark 2.0.0 (Replace with 2.1.0, 2.2.0, 2.3.0, 2.4.0 according to your Spark version):
+Provide Spark the location of the SparkRDMA plugin jars by using the extraClassPath option. 
+
 ```
-spark.driver.extraClassPath   /path/to/SparkRDMA/target/spark-rdma-3.1-for-spark-2.0.0-jar-with-dependencies.jar
-spark.executor.extraClassPath /path/to/SparkRDMA/target/spark-rdma-3.1-for-spark-2.0.0-jar-with-dependencies.jar
+spark.driver.extraClassPath     /path/to/SparkUCX/spark-ucx-1.0-for-spark-2.4.0-jar-with-dependencies.jar
+spark.executor.extraClassPath   /path/to/SparkUCX/spark-ucx-1.0-for-spark-2.4.0-jar-with-dependencies.jar
 ```
 
 ### Running
 
-To enable the SparkRDMA Shuffle Manager plugin, add the following line to either spark-defaults.conf or any runtime configuration file:
+To enable the SparkUCX Shuffle Manager plugin, add the following configuration:
 
 ```
-spark.shuffle.manager   org.apache.spark.shuffle.rdma.RdmaShuffleManager
+spark.shuffle.manager   org.apache.spark.shuffle.UcxShuffleManager
 ```
 
 ## Build
 
-Building the SparkRDMA plugin requires [Apache Maven](http://maven.apache.org/) and Java 8
+Building the SparkUCX plugin requires [Apache Maven](http://maven.apache.org/) and Java 8
 
-1. Obtain a clone of [SparkRDMA](https://github.com/Mellanox/SparkRDMA)
+1. Install [jucx - java bindings over ucx](https://github.com/openucx/ucx/tree/master/bindings/java)
 
-2. Build the plugin for your Spark version (either 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0), e.g. for Spark 2.0.0:
-```
-mvn -DskipTests clean package -Pspark-2.0.0
-```
+2. Obtain a clone of [SparkRDMA](https://github.com/Mellanox/SparkRDMA)
 
-3. Obtain a clone of [DiSNI](https://github.com/zrlio/disni) for building libdisni:
+3. Build the plugin for your Spark version (either 2.2.0, 2.3.0, 2.4.0), e.g. for Spark 2.4.0:
 
 ```
-git clone https://github.com/zrlio/disni.git
-cd disni
-git checkout tags/v1.7 -b v1.7
-```
-
-4. Compile and install only libdisni (the jars are already included in the SparkRDMA plugin):
-
-```
-cd libdisni
-autoprepare.sh
-./configure --with-jdk=/path/to/java8/jdk
-make
-make install
+mvn -DskipTests clean package -Pspark-2.4.0
 ```
 
 ## Community discussions and support
