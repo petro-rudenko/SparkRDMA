@@ -52,13 +52,15 @@ class UcxShuffleBlockResolver(ucxShuffleManager: UcxShuffleManager)
 
   override def writeIndexFileAndCommit(shuffleId: ShuffleId, mapId: Int,
                                        lengths: Array[Long], dataTmp: File): Unit = {
+    val s = System.currentTimeMillis()
     super.writeIndexFileAndCommit(shuffleId, mapId, lengths, dataTmp)
+
+    logInfo(s"MapID: $mapId Spark's overhead : ${Utils.getUsedTimeMs(s)}")
     val workerWrapper = ucxShuffleManager.ucxNode.getWorker
+
+    workerWrapper.addDriverMetadata(ucxShuffleManager.shuffleIdToHandle(shuffleId))
     val dataFile = getDataFile(shuffleId, mapId)
     val indexFile = getIndexFile(shuffleId, mapId)
-
-    logInfo(s"Writing index file for mapId: $mapId," +
-      s"workerId: ${workerWrapper.worker.getNativeId}")
 
     val dataBackFile = new RandomAccessFile(dataFile, "rw")
     val indexBackFile = new RandomAccessFile(indexFile, "rw")
@@ -102,7 +104,7 @@ class UcxShuffleBlockResolver(ucxShuffleManager: UcxShuffleManager)
     val offsetMemory = ucxShuffleManager.ucxNode.getContext.registerMemory(offsetBuffer)
     offsetMappings.get(shuffleId).put(mapId, offsetMemory)
 
-    logInfo(s"Mapping buffers of size: ${dataFileBuffer.capacity()} b + " +
+    logInfo(s"MapID: $mapId Mapping buffers of size: ${dataFileBuffer.capacity()} b + " +
       s"${offsetBuffer.capacity()} b took ${Utils.getUsedTimeMs(mappingStartTime)}")
 
     val fileMemoryRkey = fileMemory.getRemoteKeyBuffer
@@ -132,34 +134,33 @@ class UcxShuffleBlockResolver(ucxShuffleManager: UcxShuffleManager)
 
     metadataBuffer.clear()
 
-
     val driverMetadata = workerWrapper.driverMetadaBuffer(shuffleId)
     val driverOffset = driverMetadata.address +
       mapId * ucxShuffleManager.ucxShuffleConf.metadataBlockSize
 
     val driverEndpoint = workerWrapper.driverEndpoint
 
-    logInfo(s"Writing to driver address: $driverOffset," +
-      s"buffer of size: ${metadataBuffer.capacity()}, worker: ${workerWrapper.worker.getNativeId}")
     val request = driverEndpoint.putNonBlocking(metadataBuffer, driverOffset,
       driverMetadata.ucpRkey, new UcxCallback() {
         private val startTime = System.currentTimeMillis()
 
         override def onSuccess(request: UcxRequest): Unit = {
-          logInfo(s"RDMA write mapID: $mapId to driver address($driverOffset) buffer of size: " +
+          logInfo(s"MapID: $mapId " +
+            s"RDMA write mapID: $mapId to driver address($driverOffset) buffer of size: " +
             s"${metadataBuffer.limit()} took ${Utils.getUsedTimeMs(startTime)}")
         }
       })
 
     try {
       workerWrapper.preConnect()
+      workerWrapper.progressRequest(request)
     } catch {
       case exception: Exception => logWarning(s"Failed to establish connection:" +
         s"${exception.getLocalizedMessage}")
+        workerWrapper.clearConnections()
     }
-
-    workerWrapper.progressRequest(request)
     ucxShuffleManager.ucxNode.putWorker(workerWrapper)
+    logInfo(s"MapID: $mapId Total overhead: ${Utils.getUsedTimeMs(s)}")
   }
 
   def removeShuffle(shuffleId: Int): Unit = {

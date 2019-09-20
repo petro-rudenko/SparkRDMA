@@ -4,6 +4,7 @@ import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Snapshot;
 import com.codahale.metrics.UniformReservoir;
 import org.apache.spark.SparkEnv;
+import org.apache.spark.executor.TempShuffleReadMetrics;
 import org.apache.spark.network.buffer.ManagedBuffer;
 import org.apache.spark.network.buffer.NioManagedBuffer;
 import org.apache.spark.network.shuffle.BlockFetchingListener;
@@ -12,10 +13,12 @@ import org.apache.spark.network.shuffle.ShuffleClient;
 import org.apache.spark.shuffle.ShuffleHandle;
 import org.apache.spark.shuffle.UcxShuffleManager;
 import org.apache.spark.shuffle.UcxWorkerWrapper;
+import org.apache.spark.storage.BlockId;
 import org.apache.spark.storage.BlockId$;
 import org.apache.spark.storage.BlockManagerId;
 import org.apache.spark.storage.ShuffleBlockId;
 import org.apache.spark.util.Utils;
+import org.openucx.jucx.UcxUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.openucx.jucx.UcxCallback;
@@ -26,28 +29,33 @@ import org.openucx.jucx.ucp.UcpRemoteKey;
 import scala.Option;
 
 import java.nio.ByteBuffer;
-import java.util.LinkedList;
+import java.util.Arrays;
 
 public class UcxShuffleClient extends ShuffleClient {
   private final MemoryPool mempool;
   private final Histogram histogram = new Histogram(new UniformReservoir());
 
   private static final Logger logger = LoggerFactory.getLogger(UcxShuffleClient.class);
-  private UcxShuffleManager ucxShuffleManager;
-  private ShuffleHandle handle;
+  private final UcxShuffleManager ucxShuffleManager;
+  private final ShuffleHandle handle;
+  private final TempShuffleReadMetrics shuffleReadMetrics;
+  private final UcxWorkerWrapper workerWrapper;
 
 
-  public UcxShuffleClient(ShuffleHandle handle) {
+  public UcxShuffleClient(ShuffleHandle handle,
+                          TempShuffleReadMetrics shuffleReadMetrics, UcxWorkerWrapper workerWrapper) {
     this.ucxShuffleManager = (UcxShuffleManager) SparkEnv.get().shuffleManager();
     this.mempool = ucxShuffleManager.ucxNode().getMemoryPool();
     this.handle = handle;
+    this.shuffleReadMetrics = shuffleReadMetrics;
+    this.workerWrapper = workerWrapper;
   }
 
   @Override
   public void fetchBlocks(String host, int port, String execId,
                           String[] blockIds, BlockFetchingListener listener,
                           DownloadFileManager downloadFileManager) {
-    UcxWorkerWrapper workerWrapper = ucxShuffleManager.ucxNode().getWorker();
+    long startTime = System.currentTimeMillis();
     workerWrapper.addDriverMetadata(handle);
     workerWrapper.fetchDriverMetadataBuffer(handle);
     BlockManagerId blockManagerId = BlockManagerId.apply(execId, host, port, Option.apply(null));
@@ -57,10 +65,14 @@ public class UcxShuffleClient extends ShuffleClient {
     UcpRemoteKey[] offsetRkeyArray = workerWrapper.offsetRkeyCache().get(handle.shuffleId()).get();
     UcpRemoteKey[] dataRkeyArray = workerWrapper.dataRkeyCache().get(handle.shuffleId()).get();
 
-    LinkedList<UcxRequest> requests = new LinkedList<>();
+    long[] dataAddresses = new long[blockIds.length];
+    UcpRemoteKey[] dataRkeys = new UcpRemoteKey[blockIds.length];
 
-    for (String block : blockIds) {
-      ShuffleBlockId blockId = (ShuffleBlockId) BlockId$.MODULE$.apply(block);
+    RegisteredMemory offsetMemory = mempool.get(16 * blockIds.length);
+    ByteBuffer resultOffset = offsetMemory.getBuffer();
+
+    for (int i = 0; i < blockIds.length; i++) {
+      ShuffleBlockId blockId = (ShuffleBlockId) BlockId$.MODULE$.apply(blockIds[i]);
 
       // Get block offset
       int mapIdBlock = blockId.mapId() *
@@ -69,6 +81,7 @@ public class UcxShuffleClient extends ShuffleClient {
       long offsetAdress = metadata.getLong(mapIdBlock + offsetWithinBlock);
       offsetWithinBlock += 8;
       long dataAddress = metadata.getLong(mapIdBlock + offsetWithinBlock);
+      dataAddresses[i] = dataAddress;
       offsetWithinBlock += 8;
 
       if (offsetRkeyArray[blockId.mapId()] == null ||
@@ -80,8 +93,7 @@ public class UcxShuffleClient extends ShuffleClient {
 
 
         if (offsetRKeySize <= 0 || dataRkeySize <= 0) {
-          logger.error("Metadata: {}", metadata.asCharBuffer().toString());
-          throw new UcxException("Wrong rkey size");
+          throw new UcxException("Wrong rkey size.");
         }
         final ByteBuffer rkeyCopy = metadata.slice();
         rkeyCopy.position(mapIdBlock + offsetWithinBlock)
@@ -100,77 +112,75 @@ public class UcxShuffleClient extends ShuffleClient {
         dataRkeyArray[blockId.mapId()] = dataMemory;
       }
 
-      RegisteredMemory offsetMemory = mempool.get(16);
-      ByteBuffer resultOffset = offsetMemory.getBuffer();
-
-      UcxRequest getOffset = endpoint.getNonBlocking(offsetAdress + blockId.reduceId() * 8L,
-        offsetRkeyArray[blockId.mapId()], resultOffset, new UcxCallback() {
-          long startTime = System.currentTimeMillis();
-
-          @Override
-          public void onError(int ucsStatus, String errorMsg) {
-            logger.error("Failed to fetch offset for block {}, to bm {} by ep {}: {}." +
-                "At address: {}.", blockId, blockManagerId, endpoint.getNativeId(),
-              errorMsg, offsetAdress + blockId.reduceId() * 8L);
-            System.exit(-1);
-          }
-
-          @Override
-          public void onSuccess(UcxRequest request) {
-            long blockOffset = resultOffset.getLong(0);
-            long blockLength = resultOffset.getLong(8) - blockOffset;
-            logger.trace("Got data offset from address {} for block {} took: {}. " +
-                "Will read block of size {} b from data file",
-              offsetAdress + blockId.reduceId() * 8L,
-              blockId, Utils.getUsedTimeMs(startTime), blockLength);
-            mempool.put(offsetMemory);
-
-            RegisteredMemory blockMemory = mempool.get((int) blockLength);
-            ByteBuffer blockBuffer = blockMemory.getBuffer();
-            UcpRemoteKey blockKey = dataRkeyArray[blockId.mapId()];
-
-            UcxRequest getBlock = endpoint.getNonBlocking(dataAddress + blockOffset, blockKey,
-              blockBuffer, new UcxCallback() {
-                long startBlockFetch = System.currentTimeMillis();
-
-                @Override
-                public void onError(int ucsStatus, String errorMsg) {
-                  logger.error("Failed to fetch block {} of size {}: {}",
-                    block, blockLength, errorMsg);
-                  System.exit(-1);
-                }
-
-                @Override
-                public void onSuccess(UcxRequest request) {
-                  histogram.update(System.currentTimeMillis() - startTime);
-                  logger.trace("Fetched block {} of size {} in {}. Total ofset + data read {}.",
-                    blockId, blockLength, Utils.getUsedTimeMs(startBlockFetch),
-                    Utils.getUsedTimeMs(startTime));
-                  listener.onBlockFetchSuccess(block, new NioManagedBuffer(blockBuffer) {
-                    @Override
-                    public ManagedBuffer release() {
-                      mempool.put(blockMemory);
-                      return this;
-                    }
-                  });
-                }
-              });
-            requests.add(getBlock);
-          }
-        });
-      requests.add(getOffset);
+      endpoint.getNonBlockingImplicit(
+        offsetAdress + blockId.reduceId() * 8L, offsetRkeyArray[blockId.mapId()],
+        UcxUtils.getAddress(resultOffset) + (i * 16), 16);
+      dataRkeys[i] = dataRkeyArray[blockId.mapId()];
     }
 
-    workerWrapper.progressRequests(requests, requests.size() * 2);
-    ucxShuffleManager.ucxNode().putWorker(workerWrapper);
+    endpoint.flushNonBlocking(new UcxCallback() {
+      @Override
+      public void onSuccess(UcxRequest request) {
+        long startTime = System.currentTimeMillis();
+        long totalSize = 0;
+        long[] sizes = new long[blockIds.length];
+        for (int i = 0; i < blockIds.length; i++) {
+          long blockOffset = resultOffset.getLong(i * 16);
+          long blockLength = resultOffset.getLong(i * 16 + 8) - blockOffset;
+          assert blockLength > 0;
+          sizes[i] = blockLength;
+
+          totalSize += blockLength;
+          dataAddresses[i] += blockOffset;
+        }
+        mempool.put(offsetMemory);
+        RegisteredMemory blocksMemory = mempool.get((int) totalSize);
+        blocksMemory.getRefCount().set(blockIds.length);
+
+        long acc = 0;
+        for (int i = 0; i < blockIds.length; i++) {
+          endpoint.getNonBlockingImplicit(dataAddresses[i], dataRkeys[i],
+            blocksMemory.getMemory().getAddress() + acc, sizes[i]);
+          acc += sizes[i];
+        }
+
+        endpoint.flushNonBlocking(new UcxCallback() {
+          @Override
+          public void onSuccess(UcxRequest request) {
+            int position = 0;
+            for (int i = 0; i < blockIds.length; i++) {
+              String block = blockIds[i];
+              blocksMemory.getBuffer().position(position).limit(position + (int) sizes[i]);
+              ByteBuffer blockBuffer = blocksMemory.getBuffer().slice();
+              position += (int) sizes[i];
+              listener.onBlockFetchSuccess(block, new NioManagedBuffer(blockBuffer) {
+                @Override
+                public ManagedBuffer release() {
+                  if (blocksMemory.getRefCount().decrementAndGet() == 0) {
+                    mempool.put(blocksMemory);
+                  }
+                  return this;
+                }
+              });
+            }
+          }
+        });
+        shuffleReadMetrics.incFetchWaitTime(System.currentTimeMillis() - startTime);
+      }});
+
+    shuffleReadMetrics.incFetchWaitTime(System.currentTimeMillis() - startTime);
   }
 
   @Override
   public void close() {
+    ucxShuffleManager.ucxNode().putWorker(workerWrapper);
+    /*
     Snapshot histSnapshot = histogram.getSnapshot();
     logger.info("Total blocks ({}) fetch time statistics: min: {}ms, " +
         "mean: {}ms, median: {}ms, 95%: {}ms, max: {}ms",
       histogram.getCount(), histSnapshot.getMin(), histSnapshot.getMean(),
       histSnapshot.getMedian(), histSnapshot.get95thPercentile(), histSnapshot.getMax());
+     */
+    logger.info("Shuffle read metrics, fetch wait time: {}ms", shuffleReadMetrics.fetchWaitTime());
   }
 }

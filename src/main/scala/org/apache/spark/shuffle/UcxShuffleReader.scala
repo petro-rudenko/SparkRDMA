@@ -17,18 +17,19 @@
 
 package org.apache.spark.shuffle
 
+import java.io.InputStream
+
 import org.apache.spark.{InterruptibleIterator, MapOutputTracker, SparkEnv, TaskContext}
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.serializer.SerializerManager
 import org.apache.spark.shuffle.ucx.UcxShuffleClient
-import org.apache.spark.storage.{BlockManager, ShuffleBlockFetcherIterator}
+import org.apache.spark.storage.{BlockId, BlockManager, ShuffleBlockFetcherIterator}
 import org.apache.spark.util.CompletionIterator
 import org.apache.spark.util.collection.ExternalSorter
 
 class UcxShuffleReader[K, C](handle: BaseShuffleHandle[K, _, C],
   startPartition: Int,
   endPartition: Int,
-  shuffleClient: UcxShuffleClient,
   context: TaskContext,
   serializerManager: SerializerManager = SparkEnv.get.serializerManager,
   blockManager: BlockManager = SparkEnv.get.blockManager,
@@ -39,6 +40,10 @@ class UcxShuffleReader[K, C](handle: BaseShuffleHandle[K, _, C],
 
     /** Read the combined key-values for this reduce task */
     override def read(): Iterator[Product2[K, C]] = {
+      val shuffleMetrics = context.taskMetrics().createTempShuffleReadMetrics()
+      val workerWrapper = SparkEnv.get.shuffleManager.asInstanceOf[UcxShuffleManager]
+        .ucxNode.getWorker
+      val shuffleClient = new UcxShuffleClient(handle, shuffleMetrics, workerWrapper)
       val wrappedStreams = new ShuffleBlockFetcherIterator(
         context,
         shuffleClient,
@@ -53,10 +58,24 @@ class UcxShuffleReader[K, C](handle: BaseShuffleHandle[K, _, C],
         SparkEnv.get.conf.get(config.MAX_REMOTE_BLOCK_SIZE_FETCH_TO_MEM),
         SparkEnv.get.conf.getBoolean("spark.shuffle.detectCorrupt", true))
 
-      val serializerInstance = dep.serializer.newInstance()
 
-      // Create a key/value iterator for each stream
-      val recordIter = wrappedStreams.flatMap { case (blockId, wrappedStream) =>
+      val ucxWrappedStream = new Iterator[(BlockId, InputStream)] {
+        override def next(): (BlockId, InputStream) = {
+          workerWrapper.progressRequests()
+          wrappedStreams.next()
+        }
+
+        override def hasNext: Boolean = {
+          val result = wrappedStreams.hasNext
+          if (!result) {
+            shuffleClient.close()
+          }
+          result
+        }
+      }
+
+      val serializerInstance = dep.serializer.newInstance()
+      val recordIter = ucxWrappedStream.flatMap { case (blockId, wrappedStream) =>
         // Note: the asKeyValueIterator below wraps a key/value iterator inside of a
         // NextIterator. The NextIterator makes sure that close() is called on the
         // underlying InputStream when all records have been read.
@@ -104,7 +123,6 @@ class UcxShuffleReader[K, C](handle: BaseShuffleHandle[K, _, C],
           context.taskMetrics().incPeakExecutionMemory(sorter.peakMemoryUsedBytes)
           // Use completion callback to stop sorter if task was finished/cancelled.
           context.addTaskCompletionListener[Unit](_ => {
-            shuffleClient.close()
             sorter.stop()
           })
           CompletionIterator[Product2[K, C],

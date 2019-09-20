@@ -20,8 +20,8 @@ import java.io.Closeable
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.util.Try
 
 import org.openucx.jucx.UcxRequest
 import org.openucx.jucx.ucp.{UcpEndpoint, UcpEndpointParams, UcpRemoteKey, UcpWorker}
@@ -41,6 +41,8 @@ class UcxWorkerWrapper(val worker: UcpWorker, val conf: UcxShuffleConf) extends 
   private final val endpointParams = new UcpEndpointParams().setSocketAddress(socketAddress)
     .setPeerErrorHadnlingMode()
   val driverEndpoint: UcpEndpoint = worker.newEndpoint(endpointParams)
+
+  private var requestsQueue = mutable.ListBuffer.empty[UcxRequest]
 
   final val driverMetadaBuffer = mutable.Map.empty[ShuffleId, DriverMetadaBuffer]
 
@@ -110,14 +112,30 @@ class UcxWorkerWrapper(val worker: UcpWorker, val conf: UcxShuffleConf) extends 
     logTrace(s"Request completed in ${Utils.getUsedTimeMs(startTime)}")
   }
 
-  def progressRequests(requests: java.util.Collection[UcxRequest], numRequests: Int): Unit = {
-    val startTime = System.currentTimeMillis()
-    while (!requests.asScala.forall(_.isCompleted) || requests.size() != numRequests) {
+  def progressRequests(): Unit = {
+    val flushRequest = worker.flushNonBlocking(null)
+    while (!flushRequest.isCompleted) {
       progress()
     }
-    logTrace(s"$numRequests completed in ${Utils.getUsedTimeMs(startTime)}")
   }
 
+  def progressRequests(requests: Array[UcxRequest]): Unit = {
+    val startTime = System.currentTimeMillis()
+    while (!requests.forall(_.isCompleted)) {
+      val result = progress()
+      if (result == 0 ) {
+        logWarning(s"Empty progress during offset fetch.")
+      }
+    }
+    logTrace(s"${requests.length} completed in ${Utils.getUsedTimeMs(startTime)}")
+  }
+
+  def submitRequest(request: UcxRequest): Unit = {
+    require(request != null, "request is null")
+    requestsQueue += request
+  }
+
+  def hasRequests: Boolean = requestsQueue.nonEmpty
 
   /**
    * The only place for worker progress
@@ -135,13 +153,16 @@ class UcxWorkerWrapper(val worker: UcpWorker, val conf: UcxShuffleConf) extends 
 
   def getConnection(blockManagerId: BlockManagerId): UcpEndpoint = {
     connections.getOrElseUpdate(blockManagerId, {
-      logInfo(s"Creating connection to $blockManagerId")
+      logInfo(s"${##} Creating connection to $blockManagerId")
       val endpointParams = new UcpEndpointParams()
         .setPeerErrorHadnlingMode()
         .setSocketAddress(new InetSocketAddress(blockManagerId.host, blockManagerId.port + 7))
-      val endpoint = worker.newEndpoint(endpointParams)
-      progress()
-      endpoint
+      worker.newEndpoint(endpointParams)
     })
+  }
+
+  def clearConnections(): Unit = Try {
+    connections.values.foreach(_.close())
+    connections.clear()
   }
 }

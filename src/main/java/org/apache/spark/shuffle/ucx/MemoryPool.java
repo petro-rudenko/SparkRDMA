@@ -23,9 +23,8 @@ public class MemoryPool implements Closeable {
     for (AllocatorStack stack: allocStackMap.values()) {
       stack.close();
       logger.info("Stack of size {}. " +
-          "Total requests: {}, total allocations: {}, preAllocations: {}, deallocations: {}",
-        stack.length, stack.totalRequests.get(), stack.totalAlloc.get(), stack.preAllocs.get(),
-        stack.totalDealloc.get());
+          "Total requests: {}, total allocations: {}, preAllocations: {}",
+        stack.length, stack.totalRequests.get(), stack.totalAlloc.get(), stack.preAllocs.get());
     }
     allocStackMap.clear();
   }
@@ -33,7 +32,6 @@ public class MemoryPool implements Closeable {
   private class AllocatorStack implements Closeable {
     private final AtomicInteger totalRequests = new AtomicInteger(0);
     private final AtomicInteger totalAlloc = new AtomicInteger(0);
-    private final AtomicInteger totalDealloc = new AtomicInteger(0);
     private final AtomicInteger preAllocs = new AtomicInteger(0);
     private final ConcurrentLinkedDeque<RegisteredMemory> stack = new ConcurrentLinkedDeque<>();
     private final int length;
@@ -83,7 +81,6 @@ public class MemoryPool implements Closeable {
         RegisteredMemory memory = stack.pollFirst();
         if (memory.getMemory().getNativeId() != null) {
           memory.getMemory().deregister();
-          totalDealloc.incrementAndGet();
         }
       }
     }
@@ -115,9 +112,9 @@ public class MemoryPool implements Closeable {
     return length;
   }
 
-  RegisteredMemory get(int size) {
+  public RegisteredMemory get(int size) {
     long roundedSize = roundUpToTheNextPowerOf2(size);
-    assert roundedSize < Integer.MAX_VALUE;
+    assert roundedSize < Integer.MAX_VALUE && roundedSize > 0;
     AllocatorStack stack =
       allocStackMap.computeIfAbsent((int)roundedSize, AllocatorStack::new);
     RegisteredMemory result = stack.get();
@@ -125,7 +122,7 @@ public class MemoryPool implements Closeable {
     return result;
   }
 
-  void put(RegisteredMemory memory) {
+  public void put(RegisteredMemory memory) {
     ByteBuffer buffer = memory.getBuffer();
     AllocatorStack allocatorStack = allocStackMap.get(buffer.capacity());
     if (allocatorStack != null) {

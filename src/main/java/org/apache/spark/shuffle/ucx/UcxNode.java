@@ -10,6 +10,7 @@ import java.io.Closeable;
 import java.net.InetSocketAddress;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicInteger;
 
 
 import org.slf4j.Logger;
@@ -19,13 +20,14 @@ public class UcxNode implements Closeable {
   private final UcxShuffleConf conf;
   private final UcpContext context;
   private final MemoryPool memoryPool;
-  private final UcpWorkerParams workerParams;
+  private final UcpWorkerParams workerParams = new UcpWorkerParams().requestThreadSafety();
   private volatile UcpWorker globalWorker;
   private volatile UcpListener listener;
   private boolean closed = false;
 
-  private Queue<UcxWorkerWrapper> workerPool = new ConcurrentLinkedDeque<>();
+  private final Queue<UcxWorkerWrapper> workerPool = new ConcurrentLinkedDeque<>();
   private static final Logger logger = LoggerFactory.getLogger(UcxNode.class);
+  private static final AtomicInteger numWorkers = new AtomicInteger(0);
 
   private Thread listenerProgressThread;
 
@@ -33,25 +35,24 @@ public class UcxNode implements Closeable {
     this.conf = conf;
     UcpParams params = new UcpParams().requestRmaFeature().requestWakeupFeature()
       .setMtWorkersShared(true)
-      .setEstimatedNumEps(conf.getNumProcesses());
-    workerParams = new UcpWorkerParams().requestThreadSafety();
+      .setEstimatedNumEps(conf.coresPerProcess() * conf.getNumProcesses());
     context = new UcpContext(params);
     memoryPool = new MemoryPool(context, conf);
+    globalWorker = context.newWorker(workerParams);
+    InetSocketAddress socketAddress;
+    if (isDriver) {
+      socketAddress = new InetSocketAddress(conf.driverHost(), conf.driverPort());
+    } else {
+      BlockManagerId blockManagerId = SparkEnv.get().blockManager().blockManagerId();
+      socketAddress = new InetSocketAddress(blockManagerId.host(), blockManagerId.port() + 7);
+    }
+    UcpListenerParams listenerParams = new UcpListenerParams().setSockAddr(socketAddress);
+    listener = globalWorker.newListener(listenerParams);
+    logger.info("Started UcxNode on {}", socketAddress);
 
     listenerProgressThread = new Thread() {
       @Override
       public void run() {
-        globalWorker = context.newWorker(workerParams);
-        BlockManagerId blockManagerId = SparkEnv.get().blockManager().blockManagerId();
-        InetSocketAddress socketAddress;
-        if (isDriver) {
-          socketAddress = new InetSocketAddress(conf.driverHost(), conf.driverPort());
-        } else {
-          socketAddress = new InetSocketAddress(blockManagerId.host(), blockManagerId.port() + 7);
-        }
-        UcpListenerParams listenerParams = new UcpListenerParams().setSockAddr(socketAddress);
-        listener = globalWorker.newListener(listenerParams);
-        logger.info("Started UcxNode on {}", socketAddress);
         while (!isInterrupted()) {
           try {
             if (globalWorker.progress() == 0) {
@@ -80,7 +81,7 @@ public class UcxNode implements Closeable {
     }
   }
 
-  MemoryPool getMemoryPool() {
+  public MemoryPool getMemoryPool() {
     return memoryPool;
   }
 
@@ -91,7 +92,7 @@ public class UcxNode implements Closeable {
   public UcxWorkerWrapper getWorker() {
     UcxWorkerWrapper result = workerPool.poll();
     if (result == null) {
-      logger.warn("Creating new worker wrapper.");
+      logger.warn("Creating new worker wrapper: {}.", numWorkers.incrementAndGet());
       UcpWorker worker = context.newWorker(workerParams);
       result = new UcxWorkerWrapper(worker, conf);
     }
@@ -112,9 +113,9 @@ public class UcxNode implements Closeable {
         memoryPool.close();
         listener.close();
         globalWorker.close();
-        context.close();
         workerPool.forEach(UcxWorkerWrapper::close);
         workerPool.clear();
+        context.close();
         closed = true;
       }
     }

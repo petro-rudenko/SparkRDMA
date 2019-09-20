@@ -46,12 +46,18 @@ class UcxShuffleManager(val conf: SparkConf, isDriver: Boolean)
   private val shuffleIdToMetadataBuffer =
     new ConcurrentHashMap[ShuffleId, UcpMemory]().asScala
 
+  val shuffleIdToHandle = new ConcurrentHashMap[ShuffleId, ShuffleHandle]().asScala
+
   def startUcxNodeIfMissing(): Unit = {
     synchronized {
       if (ucxNode == null) {
         ucxNode = new UcxNode(ucxShuffleConf, isDriver)
       }
     }
+  }
+
+  if (isDriver) {
+    startUcxNodeIfMissing()
   }
 
   // Called on the driver only!
@@ -86,18 +92,15 @@ class UcxShuffleManager(val conf: SparkConf, isDriver: Boolean)
   override def getWriter[K, V](handle: ShuffleHandle, mapId: Int,
                                context: TaskContext): ShuffleWriter[K, V] = {
     startUcxNodeIfMissing()
-    val workerWrapper = ucxNode.getWorker
-    workerWrapper.addDriverMetadata(handle)
-    ucxNode.putWorker(workerWrapper)
+    shuffleIdToHandle.putIfAbsent(handle.shuffleId, handle)
     super.getWriter(handle, mapId, context)
   }
 
   override def getReader[K, C](handle: ShuffleHandle, startPartition: Int,
                                endPartition: Int, context: TaskContext): ShuffleReader[K, C] = {
     startUcxNodeIfMissing()
-    val shuffleClient = new UcxShuffleClient(handle)
     new UcxShuffleReader(handle.asInstanceOf[BaseShuffleHandle[K, _, C]], startPartition,
-      endPartition, shuffleClient, context)
+      endPartition, context)
   }
 
   override val shuffleBlockResolver: UcxShuffleBlockResolver = new UcxShuffleBlockResolver(this)
