@@ -45,6 +45,7 @@ public class UcxRemoteMemory implements java.io.Serializable {
   }
 
   public ByteBuffer getrKeyBuffer() {
+    assert rKeyBuffer != null;
     return rKeyBuffer;
   }
 

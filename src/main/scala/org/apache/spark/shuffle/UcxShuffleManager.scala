@@ -27,7 +27,6 @@ import org.apache.spark.{ShuffleDependency, SparkConf, TaskContext}
 import org.apache.spark.shuffle.sort.{SerializedShuffleHandle, SortShuffleManager}
 import org.apache.spark.shuffle.ucx.{UcxNode, UcxShuffleClient}
 import org.apache.spark.shuffle.ucx.rpc.UcxRemoteMemory
-import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.ShutdownHookManager
 
 case class DriverMetadaBuffer(address: Long, ucpRkey: UcpRemoteKey, var length: Int,
@@ -66,8 +65,10 @@ class UcxShuffleManager(val conf: SparkConf, isDriver: Boolean)
                                         dependency: ShuffleDependency[K, V, C]): ShuffleHandle = {
     assume(isDriver)
     startUcxNodeIfMissing()
-    val metadataBuffer = Platform.allocateDirectBuffer(
-      numMaps * ucxShuffleConf.metadataBlockSize.toInt)
+    val metadataBufferSize = numMaps * ucxShuffleConf.metadataBlockSize
+    assert(metadataBufferSize > 0 && metadataBufferSize < Int.MaxValue,
+      s"Metadata buffer size: 0 < $metadataBufferSize < ${Int.MaxValue}")
+    val metadataBuffer = ByteBuffer.allocateDirect(metadataBufferSize.toInt)
 
     val metadataMemory = ucxNode.getContext.registerMemory(metadataBuffer)
     shuffleIdToMetadataBuffer.put(shuffleId, metadataMemory)

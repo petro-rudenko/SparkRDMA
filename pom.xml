@@ -1,21 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
                       http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>com.github.mellanox</groupId>
+  <groupId>org.openucx</groupId>
   <artifactId>spark-ucx</artifactId>
   <version>1.0</version>
   <name>${project.artifactId}</name>
-  <description>SparkUCX Shuffle Manager Plugin</description>
+  <description>
+    A high-performance, scalable and efficient shuffle manager plugin for Apache Spark,
+    utilizing UCX communication layer
+  </description>
   <packaging>jar</packaging>
 
   <licenses>
     <license>
-      <name>Apache 2.0 License</name>
-      <url>http://www.apache.org/licenses/LICENSE-2.0.html</url>
+      <name>BSD 3 Clause License</name>
+      <url>http://www.openucx.org/license/</url>
       <distribution>repo</distribution>
     </license>
   </licenses>
@@ -52,7 +55,7 @@
   <dependencies>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-core_2.11</artifactId>
+      <artifactId>spark-core_${scala.compat.version}</artifactId>
       <version>${spark.version}</version>
       <scope>provided</scope>
     </dependency>
@@ -69,7 +72,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-checkstyle-plugin</artifactId>
-        <version>3.0.0</version>
+        <version>3.1.0</version>
         <executions>
           <execution>
             <id>validate</id>
@@ -79,10 +82,7 @@
               <encoding>UTF-8</encoding>
               <consoleOutput>true</consoleOutput>
               <failsOnError>true</failsOnError>
-              <linkXRef>false</linkXRef>
               <outputFile>${basedir}/target/checkstyle-output.xml</outputFile>
-              <inputEncoding>${project.build.sourceEncoding}</inputEncoding>
-              <outputEncoding>${project.reporting.outputEncoding}</outputEncoding>
             </configuration>
             <goals>
               <goal>check</goal>
@@ -116,15 +116,15 @@
         </executions>
       </plugin>
       <plugin>
-        <groupId>org.scala-tools</groupId>
-        <artifactId>maven-scala-plugin</artifactId>
-        <version>2.15.2</version>
+        <groupId>net.alchim31.maven</groupId>
+        <artifactId>scala-maven-plugin</artifactId>
+        <version>4.2.0</version>
         <executions>
           <execution>
             <id>compile</id>
-              <goals>
-                <goal>compile</goal>
-              </goals>
+            <goals>
+              <goal>compile</goal>
+            </goals>
             <phase>compile</phase>
           </execution>
           <execution>

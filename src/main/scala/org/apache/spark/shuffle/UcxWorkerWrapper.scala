@@ -23,7 +23,7 @@ import java.nio.ByteBuffer
 import scala.collection.mutable
 import scala.util.Try
 
-import org.openucx.jucx.UcxRequest
+import org.openucx.jucx.{UcxCallback, UcxRequest}
 import org.openucx.jucx.ucp.{UcpEndpoint, UcpEndpointParams, UcpRemoteKey, UcpWorker}
 
 import org.apache.spark.SparkEnv
@@ -32,7 +32,8 @@ import org.apache.spark.storage.{BlockManager, BlockManagerId}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.Utils
 
-class UcxWorkerWrapper(val worker: UcpWorker, val conf: UcxShuffleConf) extends Closeable
+class UcxWorkerWrapper(val worker: UcpWorker, val conf: UcxShuffleConf,
+                       val id: Int) extends Closeable
   with Logging {
   type ShuffleId = Int
   type MapId = Int
@@ -113,10 +114,16 @@ class UcxWorkerWrapper(val worker: UcpWorker, val conf: UcxShuffleConf) extends 
   }
 
   def progressRequests(): Unit = {
-    val flushRequest = worker.flushNonBlocking(null)
-    while (!flushRequest.isCompleted) {
-      progress()
+    for (_ <- 0 to 2) {
+      val request = worker.flushNonBlocking(null)
+      progressRequest(request)
     }
+    /*
+    while (!requestsQueue.isEmpty) {
+      progress()
+      requestsQueue = requestsQueue.filterNot(_.isCompleted)
+    }
+    */
   }
 
   def progressRequests(requests: Array[UcxRequest]): Unit = {

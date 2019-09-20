@@ -43,6 +43,7 @@ class UcxShuffleReader[K, C](handle: BaseShuffleHandle[K, _, C],
       val shuffleMetrics = context.taskMetrics().createTempShuffleReadMetrics()
       val workerWrapper = SparkEnv.get.shuffleManager.asInstanceOf[UcxShuffleManager]
         .ucxNode.getWorker
+      logInfo(s"Get worker wrapper ${workerWrapper.id}")
       val shuffleClient = new UcxShuffleClient(handle, shuffleMetrics, workerWrapper)
       val wrappedStreams = new ShuffleBlockFetcherIterator(
         context,

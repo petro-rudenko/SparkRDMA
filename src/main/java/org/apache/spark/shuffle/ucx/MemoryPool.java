@@ -62,6 +62,9 @@ public class MemoryPool implements Closeable {
     }
 
     private void preallocate(int numBuffers) {
+      while ((long)length * (long)numBuffers > Integer.MAX_VALUE) {
+        numBuffers--;
+      }
       ByteBuffer buffer = Platform.allocateDirectBuffer(length * numBuffers);
       UcpMemory memory = context.registerMemory(buffer);
       AtomicInteger refCount = new AtomicInteger(numBuffers);
@@ -79,8 +82,8 @@ public class MemoryPool implements Closeable {
     public void close() {
       while (!stack.isEmpty()) {
         RegisteredMemory memory = stack.pollFirst();
-        if (memory.getMemory().getNativeId() != null) {
-          memory.getMemory().deregister();
+        if (memory != null) {
+          memory.deregisterNativeMemory();
         }
       }
     }
@@ -134,6 +137,7 @@ public class MemoryPool implements Closeable {
 
   void preAlocate() {
     conf.preallocateBuffers().forEach((size, numBuffers) -> {
+      logger.debug("Pre allocating {} buffers of size {}", numBuffers, size);
       AllocatorStack stack = new AllocatorStack(size);
       allocStackMap.put(size, stack);
       stack.preallocate(numBuffers);

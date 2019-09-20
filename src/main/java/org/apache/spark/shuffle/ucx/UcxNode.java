@@ -8,8 +8,7 @@ import org.openucx.jucx.ucp.*;
 
 import java.io.Closeable;
 import java.net.InetSocketAddress;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 
@@ -21,11 +20,15 @@ public class UcxNode implements Closeable {
   private final UcpContext context;
   private final MemoryPool memoryPool;
   private final UcpWorkerParams workerParams = new UcpWorkerParams().requestThreadSafety();
-  private volatile UcpWorker globalWorker;
-  private volatile UcpListener listener;
+  private UcpWorker globalWorker;
+  private UcpListener listener;
   private boolean closed = false;
 
-  private final Queue<UcxWorkerWrapper> workerPool = new ConcurrentLinkedDeque<>();
+  private final LinkedBlockingQueue<UcxWorkerWrapper> workerPool =
+    new LinkedBlockingQueue<>();
+
+  private final ThreadLocal<UcxWorkerWrapper> worker;
+
   private static final Logger logger = LoggerFactory.getLogger(UcxNode.class);
   private static final AtomicInteger numWorkers = new AtomicInteger(0);
 
@@ -72,13 +75,21 @@ public class UcxNode implements Closeable {
 
     if (!isDriver) {
       memoryPool.preAlocate();
+
       logger.info("Creating {} workers", conf.coresPerProcess());
       for (int i = 0; i < conf.coresPerProcess(); i++) {
         UcpWorker worker = context.newWorker(workerParams);
-        UcxWorkerWrapper workerWrapper = new UcxWorkerWrapper(worker, conf);
+        UcxWorkerWrapper workerWrapper = new UcxWorkerWrapper(worker, conf,
+          numWorkers.incrementAndGet());
         workerPool.add(workerWrapper);
       }
     }
+    worker = ThreadLocal.withInitial(() -> {
+      UcpWorker worker = context.newWorker(workerParams);
+      UcxWorkerWrapper result = new UcxWorkerWrapper(worker, conf, numWorkers.incrementAndGet());
+      logger.warn("Creating new thread local worker wrapper: {}.", result.id());
+      return result;
+    });
   }
 
   public MemoryPool getMemoryPool() {
@@ -92,9 +103,9 @@ public class UcxNode implements Closeable {
   public UcxWorkerWrapper getWorker() {
     UcxWorkerWrapper result = workerPool.poll();
     if (result == null) {
-      logger.warn("Creating new worker wrapper: {}.", numWorkers.incrementAndGet());
       UcpWorker worker = context.newWorker(workerParams);
-      result = new UcxWorkerWrapper(worker, conf);
+      result = new UcxWorkerWrapper(worker, conf, numWorkers.incrementAndGet());
+      logger.warn("Creating new worker wrapper: {}.", result.id());
     }
     return result;
   }

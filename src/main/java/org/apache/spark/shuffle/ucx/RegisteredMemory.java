@@ -20,11 +20,13 @@ public class RegisteredMemory {
     return buffer;
   }
 
-  public UcpMemory getMemory() {
-    return memory;
-  }
-
   public AtomicInteger getRefCount() {
     return refcount;
+  }
+
+  public void deregisterNativeMemory() {
+    if (memory.getNativeId() != null) {
+      memory.deregister();
+    }
   }
 }
